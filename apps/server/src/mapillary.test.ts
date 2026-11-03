@@ -100,6 +100,34 @@ describe("searchMapillaryByBbox responses", () => {
     );
   });
 
+  it("never surfaces raw provider text that carries a fake token or token URL", async () => {
+    const leaked = "MLY|FAKE_TOKEN_abc123";
+    const fetchImpl = mockFetch(() =>
+      jsonResponse(
+        {
+          error: {
+            code: 190,
+            message: `invalid ${leaked} see https://graph.mapillary.com/images?access_token=${leaked}`,
+          },
+        },
+        401,
+      ),
+    );
+    await assert.rejects(
+      searchMapillaryByBbox({ bbox: [0, 0, 0.01, 0.01], token: "real-token", fetchImpl }),
+      (error: unknown) => {
+        assert.ok(error instanceof MapillaryError);
+        assert.equal(
+          error.message,
+          "Mapillary rejected the configured access token (provider status 401). Correct the server search token.",
+        );
+        assert.ok(!error.message.includes("FAKE_TOKEN"));
+        assert.ok(!error.message.includes("access_token="));
+        return true;
+      },
+    );
+  });
+
   it("maps 429 to MAPILLARY_RATE_LIMITED and preserves Retry-After", async () => {
     const fetchImpl = mockFetch(() => jsonResponse({ error: { message: "slow down" } }, 429, { "retry-after": "42" }));
     await assert.rejects(

@@ -75,6 +75,23 @@ describe("processProviderRecords", () => {
     assert.equal(processed.images[0].id, "12345");
   });
 
+  it("rejects unsafe numeric IDs instead of stringifying rounded numbers", () => {
+    const processed = processProviderRecords(RING, [
+      record({ id: Number.MAX_SAFE_INTEGER + 1 }),
+      record({ id: 12.5 }),
+    ]);
+    assert.equal(processed.images.length, 0);
+    assert.equal(processed.invalidRecordCount, 2);
+  });
+
+  it("treats numeric captured_at as milliseconds without magnitude inference", () => {
+    const processed = processProviderRecords(
+      RING,
+      [record({ id: "t1", captured_at: 1_714_561_200 })],
+    );
+    assert.equal(processed.images[0].capturedAt, 1_714_561_200);
+  });
+
   it("excludes bbox points outside the polygon but includes boundary points", () => {
     const lShape: LngLat[] = [
       [0, 0],

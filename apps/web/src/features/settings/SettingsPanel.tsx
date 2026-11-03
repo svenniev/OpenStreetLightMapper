@@ -1,13 +1,130 @@
+import { useState } from "react";
 import type { RoiSearch } from "../../hooks/useRoiSearch";
 import { MAPILLARY_CLIENT_TOKEN, OSM_TILE_URL_IS_DEFAULT } from "../../lib/config";
 import { formatArea, formatRetrievedAt, warningMessage } from "../../lib/search";
-import { ResultsList } from "../search/ResultsList";
+import { PreparationPanel } from "../preparation/PreparationPanel";
+import type { Preparation } from "../preparation/usePreparation";
+import { InventoryEntry, type StreetOption } from "../inventory/InventoryEntry";
+import type { InventorySessions } from "../inventory/useInventorySessions";
+import type { SamStatus } from "../inventory/useSamStatus";
 
 export interface SettingsPanelProps {
   search: RoiSearch;
   backendConnected: boolean;
   /** Null while unknown (backend unreachable). */
   searchConfigured: boolean | null;
+  streetTotal: number;
+  preparation: Preparation;
+  inventory: InventorySessions;
+  streetOptions: StreetOption[];
+  canOpenInventory: boolean;
+  inventoryDisabledReason: string | null;
+  sam: SamStatus;
+}
+
+export function SamSection({ search, sam }: { search: RoiSearch; sam: SamStatus }) {
+  const [concept, setConcept] = useState("street light pole");
+  const imageId = search.viewerActual.imageId;
+  const readiness = sam.readiness;
+  const statusLabel =
+    readiness.status === "unknown"
+      ? "Checking…"
+      : readiness.status === "not-configured"
+        ? "Not configured"
+        : readiness.status === "configured-unverified"
+          ? "Configured — not tested"
+          : readiness.status === "available"
+            ? `Available — last test succeeded ${formatRetrievedAt(readiness.lastTest.at)}`
+            : "Last test failed";
+  const testDisabledReason = sam.testing
+    ? "Testing…"
+    : readiness.status === "unknown"
+      ? "SAM status is still loading."
+      : readiness.status === "not-configured"
+        ? "Configure MODEL_API_KEY first (see setup below)."
+        : !imageId
+          ? "Open an image in the viewer to test on it."
+          : concept.trim().length === 0
+            ? "Enter a concept to test."
+            : null;
+
+  return (
+    <div className="sam-section">
+      <p className="search-status" role="status">
+        SAM detection: <strong>{statusLabel}</strong> · model {sam.model}
+      </p>
+      <details className="inventory-demo-details">
+        <summary>Setup instructions</summary>
+        <ol className="sam-steps">
+          <li>
+            Create a Meta Model API key at{" "}
+            <a href="https://dev.meta.ai/" target="_blank" rel="noreferrer">
+              dev.meta.ai
+            </a>{" "}
+            (select the account/project; claim hackathon credits if applicable).
+          </li>
+          <li>
+            Set <code>MODEL_API_KEY</code> in <code>apps/server/.env</code> (see{" "}
+            <code>apps/server/.env.example</code>) — server-only, never a VITE_* variable.
+          </li>
+          <li>Restart the server, then run the test below: only a successful inference proves access.</li>
+        </ol>
+        <p className="search-hint">
+          Docs:{" "}
+          <a href="https://dev.meta.ai/docs/sam/overview" target="_blank" rel="noreferrer">
+            SAM overview
+          </a>
+          ,{" "}
+          <a href="https://dev.meta.ai/docs/sam/prompting" target="_blank" rel="noreferrer">
+            prompting guide
+          </a>
+          ,{" "}
+          <a
+            href="https://github.com/meta-models/meta-model-cookbook/tree/main/07_sam/01_api_basics"
+            target="_blank"
+            rel="noreferrer"
+          >
+            API basics example
+          </a>
+          . A present-but-wrong key or missing SAM entitlement surfaces as an authentication error
+          on explicit Test/Detect work.
+        </p>
+      </details>
+      <label className="inventory-label">
+        Test concept
+        <input
+          type="text"
+          className="inventory-input"
+          value={concept}
+          maxLength={80}
+          disabled={sam.testing}
+          onChange={(event) => setConcept(event.target.value)}
+        />
+      </label>
+      <p className="search-hint">
+        Test on {imageId ? `the viewer image (${imageId})` : "a viewer image"} — transmits it to
+        Meta and uses model credits.
+      </p>
+      <div className="inventory-actions">
+        <button
+          type="button"
+          className="toolbar-button toolbar-button--small"
+          disabled={testDisabledReason !== null}
+          title={testDisabledReason ?? undefined}
+          onClick={() => {
+            if (imageId) void sam.testOnImage(imageId, concept);
+          }}
+        >
+          {sam.testing ? "Testing…" : "Test on selected image"}
+        </button>
+      </div>
+      {sam.lastTest && (
+        <p className={sam.lastTest.ok ? "search-status" : "search-status error-text"} role="status">
+          Last test {formatRetrievedAt(sam.lastTest.at)}: {sam.lastTest.message}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function RegionSummary({ search }: { search: RoiSearch }) {
@@ -77,8 +194,11 @@ function SearchControls(props: SettingsPanelProps) {
         onClick={() => void search.runSearch()}
         disabled={!search.findEnabled}
       >
-        Find Mapillary images
+        Find Mapillary sequences
       </button>
+      <p className="search-hint">
+        Sequences are discovered from available image records in the region.
+      </p>
       {disabledHint && search.roi?.valid && (
         <p className="search-hint" role="status">
           {disabledHint}
@@ -108,7 +228,7 @@ function SearchControls(props: SettingsPanelProps) {
 }
 
 function SearchResults({ search }: { search: RoiSearch }) {
-  const { status, images, query, warnings } = search;
+  const { status, query, warnings } = search;
   if (status === "empty") {
     return (
       <div className="search-results">
@@ -145,16 +265,8 @@ function SearchResults({ search }: { search: RoiSearch }) {
       )}
       <p className="coverage-note">
         These are the images returned for this search only — not complete coverage, and not
-        evidence about streetlights.
+        evidence about streetlights. Browse them as sequences in the panel below the map.
       </p>
-      <ResultsList
-        images={images}
-        selectedId={search.selectedId}
-        viewedId={search.viewerActual.imageId}
-        page={search.resultPage}
-        onPage={search.setResultPage}
-        onSelect={search.selectResult}
-      />
     </div>
   );
 }
@@ -179,6 +291,26 @@ export function SettingsPanel(props: SettingsPanelProps) {
         <h3 className="settings-heading">Mapillary search</h3>
         <SearchControls {...props} />
         <SearchResults search={search} />
+      </section>
+
+      <section aria-label="Streets and preparation">
+        <h3 className="settings-heading">Streets &amp; preparation</h3>
+        <PreparationPanel preparation={props.preparation} streetTotal={props.streetTotal} />
+      </section>
+
+      <section aria-label="Inventory workflow">
+        <h3 className="settings-heading">Inventory workflow</h3>
+        <InventoryEntry
+          inventory={props.inventory}
+          streetOptions={props.streetOptions}
+          canOpen={props.canOpenInventory}
+          disabledReason={props.inventoryDisabledReason}
+        />
+      </section>
+
+      <section aria-label="SAM detection">
+        <h3 className="settings-heading">SAM detection</h3>
+        <SamSection search={search} sam={props.sam} />
       </section>
 
       <section aria-label="Provider and configuration status">

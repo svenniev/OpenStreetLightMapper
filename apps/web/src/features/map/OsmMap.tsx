@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
-import type { Map as LeafletMap, LeafletMouseEvent } from "leaflet";
+import { divIcon, type Map as LeafletMap, type LeafletMouseEvent } from "leaflet";
 import {
   CircleMarker,
   MapContainer,
+  Marker,
   Polygon,
   Polyline,
   Popup,
@@ -29,6 +30,8 @@ const INITIAL_ZOOM = 12;
 const ACCENT = "#0e7490";
 const ERROR = "#b42318";
 const VIEWED = "#b45309";
+const STREET = "#15803d";
+const STREET_MUTED = "#94a3b8";
 
 /** Keep Leaflet in sync with panel resizes (CSS grid changes, narrow layouts). */
 function ResizeHandler() {
@@ -49,12 +52,81 @@ function ResizeHandler() {
   return null;
 }
 
+/** Manually placed inventory asset (never a camera position). */
+export interface AssetMapMarker {
+  id: string;
+  category: "pole" | "luminaire";
+  position: LatLngPair;
+}
+
 interface DrawingHandlerProps {
   drawing: DrawingTool;
   onMapClick: (pair: LatLngPair) => void;
   onMapMouseMove: (pair: LatLngPair) => void;
   onMapDoubleClick: () => void;
   onCancelDrawing: () => void;
+}
+
+/** Placement clicks: active only while armed and not drawing. */
+function PlacementHandler(props: {
+  armed: boolean;
+  drawing: DrawingTool;
+  onPlacementClick: (pair: LatLngPair) => void;
+}) {
+  const map = useMap();
+  const propsRef = useRef(props);
+  propsRef.current = props;
+
+  useEffect(() => {
+    if (!props.armed) return;
+    const handleClick = (event: LeafletMouseEvent) => {
+      const current = propsRef.current;
+      if (!current.armed || current.drawing) return;
+      current.onPlacementClick([event.latlng.lat, event.latlng.lng]);
+    };
+    map.on("click", handleClick);
+    return () => {
+      map.off("click", handleClick);
+    };
+  }, [map, props.armed]);
+
+  return null;
+}
+
+/** Bring the map into view when placement arms (placing needs the map). */
+function ScrollOnArmed(props: { armed: boolean }) {
+  const map = useMap();
+  useEffect(() => {
+    if (props.armed) map.getContainer().scrollIntoView({ block: "nearest" });
+  }, [map, props.armed]);
+  return null;
+}
+
+function AssetMarker(props: {
+  marker: AssetMapMarker;
+  selected: boolean;
+  interactive: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const { marker } = props;
+  return (
+    <Marker
+      position={marker.position}
+      icon={divIcon({
+        className: `asset-pin asset-pin--${marker.category}${props.selected ? " asset-pin--selected" : ""}`,
+        html: "",
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      })}
+      keyboard={props.interactive}
+      eventHandlers={props.interactive ? { click: () => props.onSelect(marker.id) } : {}}
+    >
+      <Tooltip>
+        {marker.id} ({marker.category === "pole" ? "Pole/support" : "Luminaire"}) — manually
+        placed, approximate.
+      </Tooltip>
+    </Marker>
+  );
 }
 
 /** Temporary drawing listeners: attached only in drawing mode, removed after. */
@@ -121,6 +193,85 @@ function DraftLayer({ draft }: { draft: DraftShape }) {
   );
 }
 
+function SequencePointMarker({
+  image,
+  outside,
+  viewed,
+  pending,
+  interactive,
+  onSelect,
+}: {
+  image: ImageResult;
+  outside: boolean;
+  viewed: boolean;
+  pending: boolean;
+  interactive: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const [lng, lat] = image.coordinate;
+  const ring = outside ? "#64748b" : ACCENT;
+  return (
+    <CircleMarker
+      center={[lat, lng]}
+      radius={viewed || pending ? 8 : 5}
+      pathOptions={
+        viewed
+          ? { color: "#0b3b47", weight: 2, fillColor: ACCENT, fillOpacity: 1 }
+          : pending
+            ? {
+                color: ring,
+                weight: 2,
+                dashArray: "3 3",
+                fillColor: "#ffffff",
+                fillOpacity: 1,
+              }
+            : outside
+              ? { color: ring, weight: 2, fillColor: "#e2e8f0", fillOpacity: 1 }
+              : { color: ring, weight: 2, fillColor: "#ffffff", fillOpacity: 1 }
+      }
+      interactive={interactive}
+      eventHandlers={{ click: () => onSelect(image.id) }}
+    >
+      <Tooltip direction="top" offset={[0, -6]}>
+        {image.id}
+      </Tooltip>
+    </CircleMarker>
+  );
+}
+
+/** Clipped in-RoI street geometry in Leaflet [lat, lng] order. */
+export interface StreetShape {
+  id: string;
+  displayName: string;
+  /** One entry per clipped fragment line. */
+  lines: LatLngPair[][];
+  checked: boolean;
+  focused: boolean;
+}
+
+function StreetLayer({ street }: { street: StreetShape }) {
+  return (
+    <>
+      {street.lines.map((line, index) => (
+        <Polyline
+          key={`${street.id}:${index}`}
+          positions={line}
+          pathOptions={
+            street.focused
+              ? { color: STREET, weight: 6, opacity: 1 }
+              : street.checked
+                ? { color: STREET, weight: 3, opacity: 0.85 }
+                : { color: STREET_MUTED, weight: 2, opacity: 0.45 }
+          }
+          interactive={false}
+        >
+          {street.focused && <Tooltip sticky>{street.displayName}</Tooltip>}
+        </Polyline>
+      ))}
+    </>
+  );
+}
+
 function RoiLayer({ roi }: { roi: CommittedRoi }) {
   const positions = roi.polygon.coordinates[0].map(
     ([lng, lat]) => [lat, lng] as LatLngPair,
@@ -134,13 +285,24 @@ function RoiLayer({ roi }: { roi: CommittedRoi }) {
   );
 }
 
+export interface SequencePoints {
+  inside: ImageResult[];
+  outside: ImageResult[];
+}
+
 export interface OsmMapProps {
   mapRef: React.RefObject<LeafletMap | null>;
   roi: CommittedRoi | null;
   drawing: DrawingTool;
   draft: DraftShape | null;
-  results: ImageResult[];
-  selectedId: string | null;
+  /** Selected-sequence members only: discovery no longer paints global dots. */
+  sequencePoints: SequencePoints;
+  /** Clipped street lines; unchecked streets render muted, focus highlights. */
+  streets: StreetShape[];
+  /** Actually displayed image: highlight derives from viewer truth, not clicks. */
+  viewedId: string | null;
+  /** Requested but not yet displayed. */
+  pendingId: string | null;
   cameraPosition: CameraPosition | null;
   viewedImageId: string | null;
   onMapClick: (pair: LatLngPair) => void;
@@ -148,6 +310,14 @@ export interface OsmMapProps {
   onMapDoubleClick: () => void;
   onCancelDrawing: () => void;
   onSelectResult: (id: string) => void;
+  /** Inventory placement: armed clicks become drafts instead of drawing. */
+  placementArmed: boolean;
+  placementDraft: LatLngPair | null;
+  /** Manually placed assets of the active inventory session. */
+  inventoryAssets: AssetMapMarker[];
+  selectedAssetId: string | null;
+  onPlacementClick: (pair: LatLngPair) => void;
+  onAssetMarkerClick: (id: string) => void;
 }
 
 export function OsmMap(props: OsmMapProps) {
@@ -161,34 +331,37 @@ export function OsmMap(props: OsmMapProps) {
         zoom={INITIAL_ZOOM}
         scrollWheelZoom
         preferCanvas
-        className="map-container"
+        className={`map-container${props.placementArmed ? " map-container--placing" : ""}`}
         aria-label="OpenStreetMap of Budapest"
       >
         <TileLayer url={OSM_TILE_URL} attribution={OSM_ATTRIBUTION} />
         {props.roi && <RoiLayer roi={props.roi} />}
+        {props.streets.map((street) => (
+          <StreetLayer key={street.id} street={street} />
+        ))}
         {props.draft && <DraftLayer draft={props.draft} />}
-        {props.results.map((image) => {
-          const [lng, lat] = image.coordinate;
-          const selected = image.id === props.selectedId;
-          return (
-            <CircleMarker
-              key={image.id}
-              center={[lat, lng]}
-              radius={selected ? 8 : 5}
-              pathOptions={
-                selected
-                  ? { color: "#0b3b47", weight: 2, fillColor: ACCENT, fillOpacity: 1 }
-                  : { color: ACCENT, weight: 2, fillColor: "#ffffff", fillOpacity: 1 }
-              }
-              interactive={markersInteractive}
-              eventHandlers={{ click: () => props.onSelectResult(image.id) }}
-            >
-              <Tooltip direction="top" offset={[0, -6]}>
-                {image.id}
-              </Tooltip>
-            </CircleMarker>
-          );
-        })}
+        {props.sequencePoints.inside.map((image) => (
+          <SequencePointMarker
+            key={image.id}
+            image={image}
+            outside={false}
+            viewed={image.id === props.viewedId}
+            pending={image.id === props.pendingId}
+            interactive={markersInteractive}
+            onSelect={props.onSelectResult}
+          />
+        ))}
+        {props.sequencePoints.outside.map((image) => (
+          <SequencePointMarker
+            key={image.id}
+            image={image}
+            outside
+            viewed={image.id === props.viewedId}
+            pending={image.id === props.pendingId}
+            interactive={markersInteractive}
+            onSelect={props.onSelectResult}
+          />
+        ))}
         {cameraPosition && (
           <CircleMarker
             center={[cameraPosition.lat, cameraPosition.lng]}
@@ -201,6 +374,25 @@ export function OsmMap(props: OsmMapProps) {
             </Popup>
           </CircleMarker>
         )}
+        {props.inventoryAssets.map((marker) => (
+          <AssetMarker
+            key={marker.id}
+            marker={marker}
+            selected={marker.id === props.selectedAssetId}
+            interactive={markersInteractive}
+            onSelect={props.onAssetMarkerClick}
+          />
+        ))}
+        {props.placementDraft && (
+          <CircleMarker
+            center={props.placementDraft}
+            radius={9}
+            pathOptions={{ color: ACCENT, weight: 2, dashArray: "4 3", fill: false }}
+            interactive={false}
+          >
+            <Tooltip permanent={false}>Draft placement — apply or cancel in the workflow</Tooltip>
+          </CircleMarker>
+        )}
         <DrawingHandler
           drawing={drawing}
           onMapClick={props.onMapClick}
@@ -208,20 +400,50 @@ export function OsmMap(props: OsmMapProps) {
           onMapDoubleClick={props.onMapDoubleClick}
           onCancelDrawing={props.onCancelDrawing}
         />
+        <PlacementHandler
+          armed={props.placementArmed}
+          drawing={drawing}
+          onPlacementClick={props.onPlacementClick}
+        />
+        <ScrollOnArmed armed={props.placementArmed} />
         <ResizeHandler />
       </MapContainer>
       <ul className="map-legend" aria-label="Map marker legend">
         <li>
           <span className="legend-swatch legend-swatch--result" aria-hidden="true" />
-          Result image
+          Sequence image
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--outside" aria-hidden="true" />
+          Sequence image outside RoI
         </li>
         <li>
           <span className="legend-swatch legend-swatch--selected" aria-hidden="true" />
-          Selected result
+          Displayed image
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--pending" aria-hidden="true" />
+          Loading image
         </li>
         <li>
           <span className="legend-swatch legend-swatch--viewed" aria-hidden="true" />
           Viewed image camera
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--street" aria-hidden="true" />
+          Street in region
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--street-muted" aria-hidden="true" />
+          Excluded street
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--asset" aria-hidden="true" />
+          Placed asset (manual, approximate)
+        </li>
+        <li>
+          <span className="legend-swatch legend-swatch--draft" aria-hidden="true" />
+          Draft placement
         </li>
       </ul>
     </>

@@ -1,20 +1,27 @@
 import type { Bbox } from "@openstreetlightmapper/geo";
+import {
+  TransportError,
+  fetchJsonWithLimits,
+} from "./providerHttp.js";
 
 /**
- * Bounded Mapillary image-metadata client for Milestone 1.
+ * Bounded Mapillary image-metadata client for RoI discovery.
  *
  * One bounding-box search per explicit user query. No creator filter, no
  * pagination following, no bulk download. Provider constraints (endpoint,
  * bbox order, strict < 0.01 sq deg bbox, limit 2000, `Authorization: OAuth`
- * header) follow the official Mapillary API documentation as verified in the
- * milestone specification; community usage corroborates the endpoint shape.
+ * header) follow the official Mapillary API documentation and are corroborated
+ * by the official MapillaryJS viewer's own request code.
+ *
+ * User-facing messages are stable templates: raw provider text (which could
+ * contain credentials or URLs) is never returned or logged.
  */
 
 export const MAPILLARY_IMAGES_ENDPOINT = "https://graph.mapillary.com/images";
 export const MAPILLARY_SEARCH_LIMIT = 2000;
 export const MAPILLARY_SEARCH_FIELDS =
   "id,geometry,computed_geometry,captured_at,is_pano,sequence";
-/** Upstream deadline: no indefinite waits. */
+/** Upstream deadline covering the whole request including body consumption. */
 export const MAPILLARY_TIMEOUT_MS = 30_000;
 
 /** Known provider throttle signals inside Graph error bodies. */
@@ -26,6 +33,7 @@ export type MapillaryErrorCode =
   | "MAPILLARY_TIMEOUT"
   | "MAPILLARY_NETWORK_ERROR"
   | "MAPILLARY_BAD_RESPONSE"
+  | "MAPILLARY_BODY_TOO_LARGE"
   | "MAPILLARY_REQUEST_FAILED";
 
 export class MapillaryError extends Error {
@@ -66,13 +74,6 @@ export interface ProviderSearchResult {
   hasMoreIndication: boolean;
 }
 
-function sanitizeProviderMessage(value: unknown): string {
-  if (typeof value !== "string") return "provider request failed";
-  // Truncate defensively; the token travels in a header, never in the URL, so
-  // upstream messages cannot echo it from our request line.
-  return value.length > 200 ? `${value.slice(0, 200)}…` : value;
-}
-
 function parseRetryAfter(headers: Headers): number | undefined {
   const raw = headers.get("retry-after");
   if (!raw) return undefined;
@@ -81,13 +82,64 @@ function parseRetryAfter(headers: Headers): number | undefined {
   return seconds;
 }
 
-interface ProviderErrorBody {
-  error?: { code?: unknown; subcode?: unknown; message?: unknown };
+/** Shared transport-failure mapping for every Mapillary client in this server. */
+export function mapTransportError(error: TransportError): MapillaryError {
+  switch (error.kind) {
+    case "aborted":
+      throw new ClientAbortedError();
+    case "timeout":
+      return new MapillaryError("MAPILLARY_TIMEOUT", "Mapillary search timed out.", {
+        retryable: true,
+      });
+    case "network":
+      return new MapillaryError(
+        "MAPILLARY_NETWORK_ERROR",
+        "Could not reach the Mapillary API (network failure).",
+        { retryable: true },
+      );
+    case "too_large":
+      return new MapillaryError(
+        "MAPILLARY_BODY_TOO_LARGE",
+        "Mapillary response exceeded the 10 MiB safety limit.",
+        { retryable: false },
+      );
+    case "bad_json":
+      return new MapillaryError("MAPILLARY_BAD_RESPONSE", "Mapillary returned malformed JSON.", {
+        retryable: false,
+      });
+  }
 }
 
-function readErrorBody(body: unknown): ProviderErrorBody {
-  if (typeof body === "object" && body !== null) return body as ProviderErrorBody;
-  return {};
+/**
+ * Shared non-2xx mapping for every Mapillary client in this server. Always
+ * throws; status-first handling keeps error bodies out of the decision.
+ */
+export function throwForMapillaryStatus(status: number, body: unknown, headers: Headers): never {
+  const errorRecord =
+    typeof body === "object" && body !== null
+      ? ((body as { error?: unknown }).error as { code?: unknown } | undefined)
+      : undefined;
+  const subcode =
+    errorRecord && typeof errorRecord.code === "number" ? errorRecord.code : null;
+  const retryAfterSec = parseRetryAfter(headers);
+  if ((subcode !== null && THROTTLE_SUBCODES.has(subcode)) || status === 429) {
+    throw new MapillaryError("MAPILLARY_RATE_LIMITED", "Mapillary rate limit reached.", {
+      retryable: true,
+      retryAfterSec,
+    });
+  }
+  if (status === 401 || status === 403) {
+    throw new MapillaryError(
+      "MAPILLARY_AUTH_ERROR",
+      `Mapillary rejected the configured access token (provider status ${status}). Correct the server search token.`,
+      { retryable: false },
+    );
+  }
+  throw new MapillaryError(
+    "MAPILLARY_REQUEST_FAILED",
+    `Mapillary request failed (provider status ${status}).`,
+    { retryable: status >= 500 },
+  );
 }
 
 /**
@@ -108,79 +160,26 @@ export async function searchMapillaryByBbox(
   });
   const url = `${MAPILLARY_IMAGES_ENDPOINT}?${params.toString()}`;
 
-  // Explicit ref'd timer: AbortSignal.timeout() does not keep the event loop
-  // alive, so a hung provider request could otherwise wait forever.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const forwardAbort = () => controller.abort();
-  options.signal?.addEventListener("abort", forwardAbort, { once: true });
-
-  let response: Response;
+  let status: number;
+  let headers: Headers;
+  let body: unknown;
   try {
-    response = await fetchImpl(url, {
-      method: "GET",
+    const result = await fetchJsonWithLimits(url, {
+      fetchImpl,
       headers: { Authorization: `OAuth ${token}`, Accept: "application/json" },
-      signal: controller.signal,
+      timeoutMs,
+      signal: options.signal,
     });
+    status = result.status;
+    headers = result.headers;
+    body = result.json;
   } catch (error) {
-    if (options.signal?.aborted) throw new ClientAbortedError();
-    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
-      throw new MapillaryError("MAPILLARY_TIMEOUT", "Mapillary search timed out.", {
-        retryable: true,
-      });
-    }
-    throw new MapillaryError(
-      "MAPILLARY_NETWORK_ERROR",
-      "Could not reach the Mapillary API (network failure).",
-      { retryable: true },
-    );
-  } finally {
-    clearTimeout(timer);
-    options.signal?.removeEventListener("abort", forwardAbort);
+    if (error instanceof TransportError) throw mapTransportError(error);
+    throw error;
   }
 
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    if (!response.ok) {
-      throw new MapillaryError(
-        "MAPILLARY_REQUEST_FAILED",
-        `Mapillary request failed with status ${response.status}.`,
-        { retryable: response.status >= 500 },
-      );
-    }
-    throw new MapillaryError(
-      "MAPILLARY_BAD_RESPONSE",
-      "Mapillary returned malformed JSON.",
-      { retryable: false },
-    );
-  }
-
-  if (!response.ok) {
-    const { error } = readErrorBody(body);
-    const subcode = typeof error?.code === "number" ? error.code : null;
-    const retryAfterSec = parseRetryAfter(response.headers);
-    if ((subcode !== null && THROTTLE_SUBCODES.has(subcode)) || response.status === 429) {
-      throw new MapillaryError("MAPILLARY_RATE_LIMITED", "Mapillary rate limit reached.", {
-        retryable: true,
-        retryAfterSec,
-      });
-    }
-    if (response.status === 401 || response.status === 403) {
-      throw new MapillaryError(
-        "MAPILLARY_AUTH_ERROR",
-        `Mapillary rejected the configured access token (status ${response.status}). ` +
-          `Provider said: ${sanitizeProviderMessage(error?.message)} Correct the server search token.`,
-        { retryable: false },
-      );
-    }
-    throw new MapillaryError(
-      "MAPILLARY_REQUEST_FAILED",
-      `Mapillary request failed with status ${response.status}: ` +
-        sanitizeProviderMessage(error?.message),
-      { retryable: response.status >= 500 },
-    );
+  if (status < 200 || status >= 300) {
+    throwForMapillaryStatus(status, body, headers);
   }
 
   if (typeof body !== "object" || body === null || !Array.isArray((body as { data?: unknown }).data)) {

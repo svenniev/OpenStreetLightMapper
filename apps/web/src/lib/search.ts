@@ -7,11 +7,30 @@ import type { ImageResult } from "./searchTypes";
 
 export const RESULT_PAGE_SIZE = 50;
 
+/** An image record is usable as in-region evidence unless flagged otherwise. */
+export function isInRegion(image: ImageResult): boolean {
+  return image.inRoi !== false;
+}
+
 export const WARNING_MESSAGES: Record<string, string> = {
   POSSIBLY_TRUNCATED:
     "The search reached the provider result limit. More images may exist; select a smaller region.",
   INVALID_RECORDS_EXCLUDED:
     "Some returned records had no usable coordinates and were excluded from the results.",
+  SEQUENCE_MEMBERS_CAPPED:
+    "This sequence has more members than the 5,000 hydration limit; only the first 5,000 were considered.",
+  SEQUENCE_MEMBERSHIP_UNKNOWN:
+    "The provider indicated more sequence members through undocumented paging; membership may be incomplete.",
+  SEQUENCE_HYDRATION_PARTIAL:
+    "Some sequence members could not be loaded; counts show what is known.",
+  SEQUENCE_MEMBERS_MISSING:
+    "Some sequence members are unavailable upstream (deleted or inaccessible).",
+  SEQUENCE_MEMBERS_INVALID:
+    "Some sequence members had no usable coordinates or belonged to another sequence, and were excluded.",
+  STREET_WAYS_INVALID:
+    "Some returned OSM ways were malformed and were excluded from the street list.",
+  SEEDED_DEMO_DATA:
+    "Demo street seeded from Mapillary sequence positions — not OpenStreetMap data. Retry streets when Overpass answers.",
 };
 
 export function warningMessage(code: string): string {

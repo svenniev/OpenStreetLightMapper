@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { latLngBounds, type Map as LeafletMap } from "leaflet";
 import {
   checkRoiLimits,
@@ -41,6 +41,9 @@ function samePair(a: LatLngPair, b: LatLngPair): boolean {
   return a[0] === b[0] && a[1] === b[1];
 }
 
+/** Session bound on hydrated (non-seed) image records in the region pool. */
+const MAX_HYDRATED_POOL = 20_000;
+
 /**
  * Coordinates drawing drafts, the single committed RoI, search generations,
  * result selection, and actual viewer state. Drafts, committed regions, query
@@ -53,19 +56,27 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
   const [draft, setDraft] = useState<DraftShape | null>(null);
   const [status, setStatus] = useState<SearchStatus>("idle");
   const [images, setImages] = useState<ImageResult[]>(EMPTY_SEARCH.images);
+  /** Discovery seeds (in-RoI by construction); grouping input, never hydrated. */
+  const [seeds, setSeeds] = useState<ImageResult[]>([]);
   const [query, setQuery] = useState<SearchQueryMeta | null>(EMPTY_SEARCH.query);
   const [warnings, setWarnings] = useState<string[]>(EMPTY_SEARCH.warnings);
   const [searchError, setSearchError] = useState<SearchError | null>(EMPTY_SEARCH.searchError);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [requestedImage, setRequestedImage] = useState<RequestedImage | null>(null);
-  const [viewerActual, setViewerActual] = useState<ViewerActual>({ imageId: null, position: null });
-  const [resultPage, setResultPage] = useState(1);
+  const [viewerActual, setViewerActual] = useState<ViewerActual>({
+    imageId: null,
+    sequenceId: null,
+    position: null,
+  });
   const [everSearched, setEverSearched] = useState(false);
+  /** Bumps on every discovery completion and pool-expanding hydration. */
+  const [imagerySnapshotId, setImagerySnapshotId] = useState(0);
 
   const roiIdRef = useRef(0);
   const requestTokenRef = useRef(0);
   const guardRef = useRef(createSearchGuard());
   const searchAbortRef = useRef<AbortController | null>(null);
+  /** Seed IDs of the current discovery; hydrated records evict around them. */
+  const seedIdsRef = useRef<Set<string>>(new Set());
 
   // Mirrors for stable async callbacks.
   const roiRef = useRef<CommittedRoi | null>(null);
@@ -76,19 +87,32 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
   optionsRef.current = options;
   const viewerActualRef = useRef(viewerActual);
   viewerActualRef.current = viewerActual;
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
 
   const invalidateSearch = useCallback(() => {
     searchAbortRef.current?.abort();
     searchAbortRef.current = null;
     guardRef.current.invalidate();
+    seedIdsRef.current = new Set();
     setStatus("idle");
     setImages([]);
+    setSeeds([]);
     setQuery(null);
     setWarnings([]);
     setSearchError(null);
-    setSelectedId(null);
-    setResultPage(1);
+    setImagerySnapshotId(0);
   }, []);
+
+  // Abort and invalidate outstanding discovery work on unmount.
+  useEffect(
+    () => () => {
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      guardRef.current.invalidate();
+    },
+    [],
+  );
 
   const commitRing = useCallback(
     (shape: RoiShape, ring: LngLat[]) => {
@@ -223,19 +247,22 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
     // A new explicit search clears the previous result set and warnings; the region stays.
     setStatus("loading");
     setImages([]);
+    setSeeds([]);
     setQuery(null);
     setWarnings([]);
     setSearchError(null);
-    setSelectedId(null);
-    setResultPage(1);
     try {
       const response = await searchMapillaryImages(current.polygon, controller.signal);
       if (!guardRef.current.isCurrent(token) || roiIdRef.current !== roiId) return; // stale
-      setImages(sortSearchResults(response.images));
+      seedIdsRef.current = new Set(response.images.map((image) => image.id));
+      const sorted = sortSearchResults(response.images);
+      setImages(sorted);
+      setSeeds(sorted);
       setQuery(response.query);
       setWarnings(response.warnings);
       setStatus(response.images.length > 0 ? "results" : "empty");
       setEverSearched(true);
+      setImagerySnapshotId((value) => value + 1);
     } catch (error) {
       if (!guardRef.current.isCurrent(token) || roiIdRef.current !== roiId) return; // stale
       if (controller.signal.aborted) {
@@ -256,32 +283,65 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
   }, []);
 
   const cancelSearch = useCallback(() => {
+    if (statusRef.current !== "loading") return;
+    // Invalidate acceptance immediately: a transport that resolves after abort
+    // must not populate results, and the UI settles on cancelled at once.
     searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
+    guardRef.current.invalidate();
+    setStatus("cancelled");
+  }, []);
+
+  /**
+   * Merge hydrated sequence members into the region pool by ID. Seeds are
+   * never evicted; non-seed records past the session bound are dropped. The
+   * imagery snapshot bumps only when the pool actually grows.
+   */
+  const mergeHydratedImages = useCallback((records: ImageResult[]): number => {
+    const seeds = seedIdsRef.current;
+    const known = new Set(imagesRef.current.map((image) => image.id));
+    const fresh = records.filter((record) => !known.has(record.id));
+    if (fresh.length === 0) return 0;
+    const merged = sortSearchResults([...imagesRef.current, ...fresh]);
+    let nonSeed = 0;
+    const trimmed = merged.filter((image) => {
+      if (seeds.has(image.id)) return true;
+      nonSeed += 1;
+      return nonSeed <= MAX_HYDRATED_POOL;
+    });
+    setImages(trimmed);
+    setImagerySnapshotId((value) => value + 1);
+    return fresh.length;
   }, []);
 
   const selectResult = useCallback((id: string) => {
-    setSelectedId(id);
     // Request a viewer load unless the viewer already shows this image; a
-    // repeated click on the failed request retries it.
+    // repeated click on the failed request retries it. Highlighting derives
+    // from actual viewer state, never from this click alone.
     if (viewerActualRef.current.imageId !== id) {
       requestTokenRef.current += 1;
       setRequestedImage({ id, token: requestTokenRef.current });
     }
   }, []);
 
-  const handleActualImageId = useCallback((imageId: string | null) => {
-    setViewerActual((prev) => (prev.imageId === imageId ? prev : { ...prev, imageId }));
-  }, []);
+  const handleActualImage = useCallback(
+    (update: { imageId: string | null; sequenceId: string | null }) => {
+      setViewerActual((prev) =>
+        prev.imageId === update.imageId && prev.sequenceId === update.sequenceId
+          ? prev
+          : { ...prev, imageId: update.imageId, sequenceId: update.sequenceId },
+      );
+    },
+    [],
+  );
 
   const handleCameraPosition = useCallback((position: ViewerActual["position"]) => {
     setViewerActual((prev) => ({ ...prev, position }));
   }, []);
 
-  const resultIds = useMemo(() => new Set(images.map((image) => image.id)), [images]);
-  const viewedInResults =
-    viewerActual.imageId !== null && resultIds.has(viewerActual.imageId);
-  const isActualOutsideResults =
-    viewerActual.imageId !== null && everSearched && !viewedInResults;
+  // Pending load indication: requested but not yet displayed.
+  const pendingId =
+    requestedImage && requestedImage.id !== viewerActual.imageId ? requestedImage.id : null;
 
   const searchAvailable = options.backendConnected && options.searchConfigured === true;
   const findEnabled = (roi?.valid ?? false) && searchAvailable && status !== "loading";
@@ -293,20 +353,17 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
     draft,
     status,
     images,
+    seeds,
     query,
     warnings,
     searchError,
-    selectedId,
     requestedImage,
+    pendingId,
     viewerActual,
-    resultPage,
     everSearched,
-    resultIds,
-    viewedInResults,
-    isActualOutsideResults,
+    imagerySnapshotId,
     searchAvailable,
     findEnabled,
-    setResultPage,
     startDrawing,
     cancelDrawing,
     handleMapClick,
@@ -318,8 +375,9 @@ export function useRoiSearch(options: UseRoiSearchOptions) {
     fitRegion,
     runSearch,
     cancelSearch,
+    mergeHydratedImages,
     selectResult,
-    handleActualImageId,
+    handleActualImage,
     handleCameraPosition,
   };
 }

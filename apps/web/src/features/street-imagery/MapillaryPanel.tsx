@@ -10,6 +10,12 @@ const IMAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 type ViewerState = "idle" | "loading" | "ready" | "error";
 
+/**
+ * Stable user-facing viewer errors. Raw error text is used only for
+ * classification and is never interpolated: provider/viewer messages could
+ * carry credentials or token-bearing URLs, which must reach neither UI
+ * nor logs.
+ */
 function classifyViewerError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const lowered = message.toLowerCase();
@@ -17,15 +23,15 @@ function classifyViewerError(error: unknown): string {
     return "WebGL is unavailable in this browser, so Mapillary imagery cannot be rendered here.";
   }
   if (/401|403|unauthor|forbidden|access token|token/i.test(message)) {
-    return `Mapillary authorization failed (${message}). Check VITE_MAPILLARY_CLIENT_TOKEN.`;
+    return "Mapillary authorization failed. Check the configured viewer token.";
   }
   if (/404|not found|invalid.*image|image.*invalid/i.test(lowered)) {
-    return `Mapillary image not found (${message}). Check the image ID.`;
+    return "Mapillary image not found. Check the image ID.";
   }
   if (/network|fetch|failed to fetch|load failed|offline/i.test(lowered)) {
-    return `Network error while loading Mapillary imagery (${message}).`;
+    return "Network error while loading Mapillary imagery.";
   }
-  return `Could not load that Mapillary image (${message}).`;
+  return "Could not load that Mapillary image.";
 }
 
 interface LngLatLike {
@@ -73,9 +79,20 @@ function extractImageId(image: unknown): string | null {
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
+function extractSequenceId(image: unknown): string | null {
+  if (typeof image !== "object" || image === null) return null;
+  const sequenceId = (image as { sequenceId?: unknown }).sequenceId;
+  return typeof sequenceId === "string" && sequenceId.length > 0 ? sequenceId : null;
+}
+
+export interface ActualImageUpdate {
+  imageId: string | null;
+  sequenceId: string | null;
+}
+
 export interface MapillaryPanelProps {
   onCameraPosition: (position: CameraPosition | null) => void;
-  onActualImageId: (imageId: string | null) => void;
+  onActualImage: (update: ActualImageUpdate) => void;
   /** Latest load request from map/list selection; the token orders repeat requests. */
   requestedImage: RequestedImage | null;
   /** True when the displayed image is not part of the current search results. */
@@ -84,7 +101,7 @@ export interface MapillaryPanelProps {
 
 export function MapillaryPanel({
   onCameraPosition,
-  onActualImageId,
+  onActualImage,
   requestedImage,
   isActualOutsideResults,
 }: MapillaryPanelProps) {
@@ -106,8 +123,8 @@ export function MapillaryPanel({
 
   const onCameraPositionRef = useRef(onCameraPosition);
   onCameraPositionRef.current = onCameraPosition;
-  const onActualImageIdRef = useRef(onActualImageId);
-  onActualImageIdRef.current = onActualImageId;
+  const onActualImageRef = useRef(onActualImage);
+  onActualImageRef.current = onActualImage;
   const actualIdRef = useRef(actualId);
   actualIdRef.current = actualId;
   const viewerStateRef = useRef(viewerState);
@@ -119,6 +136,7 @@ export function MapillaryPanel({
     arrivalRef.current += 1;
     const arrival = arrivalRef.current;
     const imageId = extractImageId(event.image);
+    const sequenceId = extractSequenceId(event.image);
     const position = await extractCameraPosition(event.image).catch(() => null);
     if (disposedRef.current) return;
     if (arrival < appliedArrivalRef.current) return;
@@ -126,7 +144,7 @@ export function MapillaryPanel({
     if (imageId) {
       const genuineChange = imageId !== actualIdRef.current;
       setActualId(imageId);
-      onActualImageIdRef.current(imageId);
+      onActualImageRef.current({ imageId, sequenceId });
       if (genuineChange) {
         // Viewer navigation to a new image retires any previous failed request.
         setError(null);
@@ -250,12 +268,13 @@ export function MapillaryPanel({
         return;
       }
       const imageId = extractImageId(outcome.result);
+      const sequenceId = extractSequenceId(outcome.result);
       const position = await extractCameraPosition(outcome.result).catch(() => null);
       if (disposedRef.current) return;
       if (queue.latestToken() !== ticket.token) return; // Newer request arrived meanwhile.
       if (imageId) {
         setActualId(imageId);
-        onActualImageIdRef.current(imageId);
+        onActualImageRef.current({ imageId, sequenceId });
       }
       onCameraPositionRef.current(position);
       setViewerState("ready");

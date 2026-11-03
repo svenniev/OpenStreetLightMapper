@@ -39,6 +39,11 @@ export interface ImageResult {
   capturedAt: number | null; // Unix milliseconds
   isPano: boolean | null;
   sequenceId: string | null;
+  /**
+   * Inside/on the committed RoI. Omitted on seed records (inside by
+   * construction); present on hydrated sequence members.
+   */
+  inRoi?: boolean;
 }
 
 export interface SearchQueryMeta {
@@ -76,6 +81,8 @@ export interface RequestedImage {
 
 export interface ViewerActual {
   imageId: string | null;
+  /** Provider sequence of the displayed image, when the viewer supplies one. */
+  sequenceId: string | null;
   position: CameraPosition | null;
 }
 

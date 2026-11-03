@@ -3,25 +3,13 @@ import {
   checkRoiLimits,
   validateRoiPolygon,
 } from "@openstreetlightmapper/geo";
-import {
-  MAPILLARY_SEARCH_LIMIT,
-  MapillaryError,
-  ClientAbortedError,
-  searchMapillaryByBbox,
-} from "../mapillary.js";
+import { MAPILLARY_SEARCH_LIMIT, searchMapillaryByBbox } from "../mapillary.js";
 import { processProviderRecords } from "../search.js";
+import { abortOnDisconnect, errorBody, sendMapillaryError } from "./errors.js";
 
 export interface SearchRouteDeps {
   fetchImpl?: typeof fetch;
   mapillaryTimeoutMs?: number;
-}
-
-interface ErrorBody {
-  error: { code: string; message: string; retryable: boolean };
-}
-
-function errorBody(code: string, message: string, retryable: boolean): ErrorBody {
-  return { error: { code, message, retryable } };
 }
 
 /** Reads configuration at request time so tests and restarts behave identically. */
@@ -76,10 +64,7 @@ export function createSearchRouter(deps?: SearchRouteDeps): express.Router {
     // Abort upstream work when the HTTP client disconnects; never leave a
     // background collection running after the caller is gone.
     const upstream = new AbortController();
-    const onClose = () => {
-      if (!res.writableEnded) upstream.abort();
-    };
-    res.on("close", onClose);
+    const release = abortOnDisconnect(res, upstream);
 
     try {
       const provider = await searchMapillaryByBbox({
@@ -111,25 +96,15 @@ export function createSearchRouter(deps?: SearchRouteDeps): express.Router {
         warnings: processed.warnings,
       });
     } catch (error) {
-      if (error instanceof ClientAbortedError) return; // Caller is gone; nothing to send.
-      if (error instanceof MapillaryError) {
-        const status =
-          error.code === "MAPILLARY_RATE_LIMITED"
-            ? 429
-            : error.code === "MAPILLARY_TIMEOUT"
-              ? 504
-              : 502;
-        if (error.code === "MAPILLARY_RATE_LIMITED" && error.retryAfterSec !== undefined) {
-          res.setHeader("Retry-After", String(error.retryAfterSec));
-        }
-        res.status(status).json(errorBody(error.code, error.message, error.retryable));
-        return;
+      if (sendMapillaryError(res, error)) {
+        // Handled (or the caller is gone and there is nothing to send).
+      } else {
+        res
+          .status(500)
+          .json(errorBody("SEARCH_FAILED", "Image search failed unexpectedly.", false));
       }
-      res
-        .status(500)
-        .json(errorBody("SEARCH_FAILED", "Image search failed unexpectedly.", false));
     } finally {
-      res.off("close", onClose);
+      release();
     }
   });
 

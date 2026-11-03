@@ -295,6 +295,14 @@ export function validateRoiPolygon(input: unknown): RoiValidation {
   return { ok: true, polygon: { type: "Polygon", coordinates: [ring] }, ring, bbox, areaSqM };
 }
 
+export {
+  clipPolylineToRing,
+  clipSegmentToRing,
+  fragmentsLengthM,
+  haversineM,
+  polylineLengthM,
+} from "./clip.js";
+
 /**
  * Milestone size limits: 25 km² polygon area plus the provider's strict bbox
  * constraint. A thin polygon can pass the area limit yet fail the bbox limit.

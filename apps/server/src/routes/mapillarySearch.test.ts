@@ -184,6 +184,40 @@ describe("POST /api/mapillary/images/search", () => {
     assert.ok(!JSON.stringify(body).includes("test-token"));
   });
 
+  it("keeps fake tokens out of error responses and server logs", async () => {
+    const leaked = "MLY|FAKE_TOKEN_abc123";
+    const app = createApp({
+      mapillaryFetch: mockProvider(
+        {
+          error: {
+            code: 190,
+            message: `invalid ${leaked} see https://graph.mapillary.com/x?access_token=${leaked}`,
+          },
+        },
+        401,
+      ),
+    });
+    const logged: string[] = [];
+    const methods = ["log", "warn", "error", "debug", "info"] as const;
+    const originals = methods.map((method) => console[method]);
+    for (const method of methods) {
+      console[method] = ((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      }) as never;
+    }
+    try {
+      const response = await postSearch(app, { roi: VALID_ROI }, "leak");
+      assert.equal(response.status, 502);
+      assert.ok(!JSON.stringify(response.body).includes("FAKE_TOKEN"));
+      assert.ok(!JSON.stringify(response.body).includes("access_token="));
+      assert.ok(!logged.join("\n").includes("FAKE_TOKEN"));
+    } finally {
+      methods.forEach((method, index) => {
+        console[method] = originals[index];
+      });
+    }
+  });
+
   it("keeps the health contract with the provider configuration flag", async () => {
     const app = createApp();
     const socketPath =
