@@ -152,6 +152,10 @@ export interface DetectionItemDocument {
   artifactId: string;
   supersedes: string | null;
   status: string;
+  /** Worker/tab that claimed the item, if any; null means unclaimed. */
+  owner: string | null;
+  /** Claim expiry; a claim with a past expiry may be taken over. */
+  leaseExpiresAt: Date | null;
   objects: Record<string, unknown>[];
   truncated: boolean;
   invalidDiscarded: number;
@@ -181,6 +185,8 @@ const detectionItemSchema = new Schema<DetectionItemDocument>(
     artifactId: { type: String, required: true, index: true },
     supersedes: { type: String, default: null },
     status: { type: String, required: true },
+    owner: { type: String, default: null },
+    leaseExpiresAt: { type: Date, default: null },
     objects: [Mixed],
     truncated: { type: Boolean, required: true },
     invalidDiscarded: { type: Number, required: true },
@@ -194,6 +200,7 @@ const detectionItemSchema = new Schema<DetectionItemDocument>(
 );
 detectionItemSchema.index({ workspaceId: 1, sessionKey: 1, runId: 1, itemId: 1 }, { unique: true });
 detectionItemSchema.index({ workspaceId: 1, sessionKey: 1, registeredAt: -1 });
+detectionItemSchema.index({ workspaceId: 1, sessionKey: 1, status: 1, leaseExpiresAt: 1 });
 
 export interface InventoryResultDocument {
   resultId: string;

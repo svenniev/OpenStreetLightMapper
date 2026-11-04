@@ -40,6 +40,12 @@ export interface SequencePanelProps {
   onRetryDetail: (sequenceId: string) => void;
   onFitSequence: () => void;
   canFitSequence: boolean;
+  /** Automatic mode: rows gain inclusion checkboxes for the run. */
+  autoMode?: boolean;
+  autoSelected?: ReadonlySet<string>;
+  onToggleAutoSequence?: (sequenceId: string) => void;
+  onSelectAutoSequences?: (sequenceIds: string[]) => void;
+  onClearAutoSelection?: () => void;
 }
 
 const FILTERS: { value: SequenceFilter; label: string }[] = [
@@ -62,14 +68,30 @@ function shortId(id: string): string {
 function SequenceRow({
   group,
   selected,
+  autoMode,
+  autoChecked,
+  onToggleAuto,
   onSelect,
 }: {
   group: SequenceGroup;
   selected: boolean;
+  autoMode: boolean;
+  autoChecked: boolean;
+  onToggleAuto: (() => void) | null;
   onSelect: () => void;
 }) {
   return (
-    <li>
+    <li className="sequence-row-item">
+      {autoMode && onToggleAuto && (
+        <input
+          type="checkbox"
+          className="sequence-checkbox"
+          checked={autoChecked}
+          onChange={onToggleAuto}
+          aria-label={`Include sequence ${group.shortId} in the automatic run`}
+          title="Include in the automatic run"
+        />
+      )}
       <button
         type="button"
         className={`sequence-row${selected ? " sequence-row--selected" : ""}`}
@@ -139,6 +161,8 @@ function viewing(viewed: boolean, pending: boolean) {
 
 export function SequencePanel(props: SequencePanelProps) {
   const { groups, selectedSequenceId, selectedLoad } = props;
+  const autoMode = props.autoMode === true;
+  const autoSelected = props.autoSelected ?? new Set<string>();
   const visible = groups.sequences.filter(
     (group) => groupMatchesFilter(group, props.filter) || group.sequenceId === selectedSequenceId,
   );
@@ -190,6 +214,32 @@ export function SequencePanel(props: SequencePanelProps) {
         </div>
       )}
 
+      {autoMode && groups.sequences.length > 0 && (
+        <div className="auto-select-bar" role="group" aria-label="Automatic run sequence selection">
+          <span className="sequence-meta" role="status">
+            {autoSelected.size} sequence{autoSelected.size === 1 ? "" : "s"} selected for the
+            automatic run
+            {autoSelected.size > visible.filter((group) => autoSelected.has(group.sequenceId)).length &&
+              " (including hidden by filter)"}
+          </span>
+          <button
+            type="button"
+            className="toolbar-button toolbar-button--small"
+            onClick={() => props.onSelectAutoSequences?.(visible.map((group) => group.sequenceId))}
+          >
+            Select visible
+          </button>
+          <button
+            type="button"
+            className="toolbar-button toolbar-button--small"
+            disabled={autoSelected.size === 0}
+            onClick={() => props.onClearAutoSelection?.()}
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
       {visible.length > 0 && (
         <ol className="sequence-list" aria-label="Discovered sequences">
           {visible.map((group) => (
@@ -197,6 +247,13 @@ export function SequencePanel(props: SequencePanelProps) {
               key={group.sequenceId}
               group={group}
               selected={group.sequenceId === selectedSequenceId}
+              autoMode={autoMode}
+              autoChecked={autoSelected.has(group.sequenceId)}
+              onToggleAuto={
+                props.onToggleAutoSequence
+                  ? () => props.onToggleAutoSequence?.(group.sequenceId)
+                  : null
+              }
               onSelect={() =>
                 props.onSelectSequence(
                   group.sequenceId === selectedSequenceId ? null : group.sequenceId,

@@ -62,6 +62,8 @@ export interface UseSequencesOptions {
     scope: SequenceScope;
     filter: SequenceFilter;
     loads: Record<string, SequenceLoadInfo>;
+    /** Sequences included in an automatic run (independent of browsing). */
+    autoSequenceIds?: string[];
   } | null;
 }
 
@@ -100,6 +102,11 @@ export function useSequences(options: UseSequencesOptions) {
   const [imageListOpen, setImageListOpen] = useState(false);
   const [imagePage, setImagePage] = useState(1);
   const [loads, setLoads] = useState<Record<string, SequenceLoadInfo>>(initial?.loads ?? {});
+  // Automatic-run inclusion: a separate persisted set. Browsing a sequence
+  // (selectSequence) never toggles its checkbox.
+  const [autoSelected, setAutoSelected] = useState<Set<string>>(
+    new Set(initial?.autoSequenceIds ?? []),
+  );
 
   const guardRef = useRef(createSearchGuard());
   const inFlightRef = useRef(new Map<string, AbortController>());
@@ -154,6 +161,7 @@ export function useSequences(options: UseSequencesOptions) {
     setImageListOpen(false);
     setImagePage(1);
     setLoads({});
+    setAutoSelected(new Set());
   }, [roiKey]);
 
   const loadDetail = useCallback(async (sequenceId: string, force = false): Promise<void> => {
@@ -271,6 +279,23 @@ export function useSequences(options: UseSequencesOptions) {
     [loadDetail],
   );
 
+  const toggleAutoSequence = useCallback((sequenceId: string) => {
+    setAutoSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(sequenceId)) next.delete(sequenceId);
+      else next.add(sequenceId);
+      return next;
+    });
+  }, []);
+
+  const selectAutoSequences = useCallback((sequenceIds: string[]) => {
+    setAutoSelected((prev) => new Set([...prev, ...sequenceIds]));
+  }, []);
+
+  const clearAutoSelection = useCallback(() => {
+    setAutoSelected(new Set());
+  }, []);
+
   const selectedGroup: SequenceGroup | null = useMemo(
     () => groups.sequences.find((group) => group.sequenceId === selectedSequenceId) ?? null,
     [groups, selectedSequenceId],
@@ -382,6 +407,10 @@ export function useSequences(options: UseSequencesOptions) {
     selectSequence,
     selectUngrouped,
     retryDetail,
+    autoSelected,
+    toggleAutoSequence,
+    selectAutoSequences,
+    clearAutoSelection,
   };
 }
 

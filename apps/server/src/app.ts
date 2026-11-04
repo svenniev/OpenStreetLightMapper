@@ -8,6 +8,7 @@ import { createSequenceRouter } from "./routes/sequenceDetail.js";
 import { samModelName } from "./sam.js";
 import { createStreetsRouter } from "./routes/streetsSearch.js";
 import { createArtifactsRouter } from "./routes/artifacts.js";
+import { createAutoRouter } from "./routes/auto.js";
 import { createItemsRouter } from "./routes/items.js";
 import { createSessionsRouter } from "./routes/sessions.js";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
@@ -31,6 +32,8 @@ export interface AppOptions {
   samFetch?: typeof fetch;
   /** Override the SAM deadline (tests use short values). */
   samTimeoutMs?: number;
+  /** Prompt the in-process auto worker to poll now (launch/resume/retry). */
+  kickAutoWorker?: () => void;
 }
 
 /**
@@ -106,6 +109,13 @@ export function createApp(options?: AppOptions): express.Express {
   app.use(createSessionsRouter());
   app.use(createItemsRouter());
   app.use(createArtifactsRouter());
+  app.use(
+    createAutoRouter({
+      fetchImpl: options?.mapillaryFetch,
+      mapillaryTimeoutMs: options?.mapillaryTimeoutMs,
+      kickWorker: options?.kickAutoWorker,
+    }),
+  );
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });

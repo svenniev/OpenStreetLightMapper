@@ -7,6 +7,7 @@ import {
   bboxOfRing,
   checkRoiLimits,
   latLngToLngLat,
+  lngLatDistanceM,
   pointInRing,
   rectangleRingFromBbox,
   ringAreaSqM,
@@ -278,5 +279,20 @@ describe("helpers", () => {
       [1, 4],
       [1, 2],
     ]);
+  });
+});
+
+describe("lngLatDistanceM", () => {
+  it("measures geodesic metres with [lng, lat] order", () => {
+    assert.equal(lngLatDistanceM([19, 47], [19, 47]), 0);
+    // One degree of latitude: ~111.2 km on the authalic sphere.
+    assert.ok(Math.abs(lngLatDistanceM([19, 47], [19, 48]) - 111195) < 1);
+    // Longitude shrinks with latitude: 1 degree at 47N is ~75.8 km.
+    assert.ok(Math.abs(lngLatDistanceM([19, 47], [20, 47]) - 75835) < 1);
+  });
+
+  it("resolves metre-scale spacing for dense photo sequences", () => {
+    // 10 m east at 47N.
+    assert.ok(Math.abs(lngLatDistanceM([19, 47], [19 + 10 / 75835, 47]) - 10) < 0.01);
   });
 });

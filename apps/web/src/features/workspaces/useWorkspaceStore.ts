@@ -98,6 +98,7 @@ export function emptySeed(): RestoredWorkspaceSeed {
       scope: "inside",
       filter: "all",
       loads: {},
+      autoSequenceIds: [],
     },
     streets: {
       status: "idle",
@@ -213,6 +214,12 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
     sessionJsons: {} as Record<string, string>,
   });
   const revisionsRef = useRef({ workspace: 0, sessions: {} as Record<string, number> });
+  /**
+   * Last acknowledged session bodies: the exact JSON each PUT carried, pinned
+   * to its revision. Reviewed results build from these — never from live
+   * tracked state, which may hold edits that landed mid-save.
+   */
+  const flushedSessionsRef = useRef({} as Record<string, { revision: number; json: string }>);
   const flushChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
   const timerRef = useRef<number | null>(null);
   const firstDirtyAtRef = useRef<number | null>(null);
@@ -443,6 +450,7 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
         });
         revisionsRef.current.sessions[key] = revision;
         acked.sessionJsons[key] = json;
+        flushedSessionsRef.current[key] = { revision, json };
       }
       // Workspace document last: references every snapshot and session key.
       const workspaceBody = buildWorkspaceBody({
@@ -525,7 +533,13 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
     if (!baseline) return;
     // Sessions: the exact JSON the content serialized from restored state.
     const sessionJsons: Record<string, string> = {};
-    for (const [key, entry] of Object.entries(tracked.sessions)) sessionJsons[key] = entry.json;
+    const flushedSessions: Record<string, { revision: number; json: string }> = {};
+    for (const [key, entry] of Object.entries(tracked.sessions)) {
+      sessionJsons[key] = entry.json;
+      const revision = baseline.sessionRevisions[key];
+      if (revision !== undefined) flushedSessions[key] = { revision, json: entry.json };
+    }
+    flushedSessionsRef.current = flushedSessions;
     ackedRef.current = {
       imageryJson: tracked.imagery?.json ?? null,
       imagerySnapshotId: baseline.imagerySnapshotId,
@@ -615,6 +629,7 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
     trackedRef.current = null;
     pendingBaselineRef.current = null;
     contentRef.current = null;
+    flushedSessionsRef.current = {};
     setNotice(null);
     setStatus({ kind: "loading" });
   }, [clearTimer]);
@@ -949,12 +964,17 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
       if (!dbReady()) return { error: "Not saved — local database unavailable." };
       const flushed = await flushNowRef.current();
       if (!flushed) return { error: "Save the session before saving the result." };
-      const sessionRevision = revisionsRef.current.sessions[sessionKey];
-      if (!sessionRevision) return { error: "Save the session before saving the result." };
-      const body = trackedRef.current?.sessions[sessionKey]?.body;
-      if (!body) return { error: "The session is not available." };
+      // Pinned to the acknowledged flush: the live tracked body may hold edits
+      // that landed mid-save, which must not attach to this revision.
+      const pinned = flushedSessionsRef.current[sessionKey];
+      if (!trackedRef.current?.sessions[sessionKey]) {
+        return { error: "The session is not available." };
+      }
+      if (!pinned) return { error: "Save the session before saving the result." };
+      const sessionRevision = pinned.revision;
       try {
-        const input = buildResultInput(body as unknown as WorkflowSession, {
+        const body = JSON.parse(pinned.json) as unknown as WorkflowSession;
+        const input = buildResultInput(body, {
           resultId,
           sessionRevision,
           finishedAt: new Date().toISOString(),
@@ -989,6 +1009,25 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
     if (!workspaceId) return [];
     return listReviewedResults(workspaceId, sessionKey).catch(() => []);
   }, []);
+
+  /**
+   * Acknowledged input snapshots for an automatic run: flushes first, then
+   * returns the exact server snapshot IDs the plan will freeze. Preparing
+   * against unflushed live state would authorize a plan nobody can re-read.
+   */
+  const pinnedSnapshotIds = useCallback(async (): Promise<
+    { imagerySnapshotId: string; streetSnapshotId: string | null } | { error: string }
+  > => {
+    if (!workspaceIdRef.current) return { error: "No workspace is open." };
+    if (!dbReady()) return { error: "Not saved — local database unavailable." };
+    const flushed = await flushNowRef.current();
+    if (!flushed) return { error: "Save the workspace before preparing the run." };
+    const imagerySnapshotId = ackedRef.current.imagerySnapshotId;
+    if (!imagerySnapshotId) {
+      return { error: "Search Mapillary first: prepare needs a saved imagery snapshot." };
+    }
+    return { imagerySnapshotId, streetSnapshotId: ackedRef.current.streetSnapshotId };
+  }, [dbReady]);
 
   const openWorkspaceRef = useRef(openWorkspace);
   openWorkspaceRef.current = openWorkspace;
@@ -1040,6 +1079,7 @@ export function useWorkspaceStore(options: WorkspaceStoreOptions) {
     persistence,
     saveReviewedResultVersion,
     listSessionResults,
+    pinnedSnapshotIds,
   };
 }
 

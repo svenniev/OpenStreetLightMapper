@@ -200,4 +200,56 @@ describe("SequencePanel", () => {
     fireEvent.click(screen.getByText("Next"));
     expect(onImagePage).toHaveBeenCalledWith(2);
   });
+
+  it("hides inclusion checkboxes outside automatic mode", () => {
+    render(<SequencePanel {...props()} />);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByText("Select visible")).toBeNull();
+  });
+
+  it("toggles inclusion without changing the browsed selection", () => {
+    const onToggleAutoSequence = vi.fn();
+    const onSelectSequence = vi.fn();
+    render(
+      <SequencePanel
+        {...props({
+          autoMode: true,
+          autoSelected: new Set(["seq-flat"]),
+          onToggleAutoSequence,
+          onSelectSequence,
+        })}
+      />,
+    );
+    const boxes = screen.getAllByRole("checkbox");
+    expect(boxes).toHaveLength(2);
+    expect((boxes[0] as HTMLInputElement).checked).toBe(false);
+    expect((boxes[1] as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/1 sequence selected/)).toBeDefined();
+    fireEvent.click(boxes[0]);
+    expect(onToggleAutoSequence).toHaveBeenCalledWith("seq-pano-123456789");
+    expect(onSelectSequence).not.toHaveBeenCalled();
+  });
+
+  it("selects visible sequences and counts selections hidden by a filter", () => {
+    const onSelectAutoSequences = vi.fn();
+    const onClearAutoSelection = vi.fn();
+    render(
+      <SequencePanel
+        {...props({
+          autoMode: true,
+          autoSelected: new Set(["seq-flat", "seq-hidden"]),
+          onSelectAutoSequences,
+          onClearAutoSelection,
+          filter: "panoramas",
+        })}
+      />,
+    );
+    // seq-flat is filtered out of view but stays selected and counted.
+    expect(screen.getByText(/2 sequences selected/)).toBeDefined();
+    expect(screen.getByText(/including hidden by filter/)).toBeDefined();
+    fireEvent.click(screen.getByText("Select visible"));
+    expect(onSelectAutoSequences).toHaveBeenCalledWith(["seq-pano-123456789"]);
+    fireEvent.click(screen.getByText("Clear selection"));
+    expect(onClearAutoSelection).toHaveBeenCalled();
+  });
 });

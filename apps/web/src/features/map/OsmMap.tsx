@@ -59,6 +59,18 @@ export interface AssetMapMarker {
   position: LatLngPair;
 }
 
+/** Automatically located asset (estimated, unreviewed — never survey-grade). */
+export interface AutoAssetMarker {
+  id: string;
+  category: "pole" | "luminaire";
+  position: LatLngPair;
+  uncertaintyM: number;
+  method: string;
+  imageCount: number;
+  sequenceCount: number;
+  flags: string[];
+}
+
 interface DrawingHandlerProps {
   drawing: DrawingTool;
   onMapClick: (pair: LatLngPair) => void;
@@ -100,6 +112,34 @@ function ScrollOnArmed(props: { armed: boolean }) {
     if (props.armed) map.getContainer().scrollIntoView({ block: "nearest" });
   }, [map, props.armed]);
   return null;
+}
+
+function AutoAssetMarkerView(props: {
+  marker: AutoAssetMarker;
+  interactive: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const { marker } = props;
+  return (
+    <Marker
+      position={marker.position}
+      icon={divIcon({
+        className: `asset-pin asset-pin--auto asset-pin--auto-${marker.category}`,
+        html: "",
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      })}
+      keyboard={props.interactive}
+      eventHandlers={props.interactive ? { click: () => props.onSelect(marker.id) } : {}}
+    >
+      <Tooltip>
+        {marker.id} ({marker.category === "pole" ? "Pole/support" : "Luminaire"}) — automatically
+        estimated ±{marker.uncertaintyM.toFixed(1)} m ({marker.method}), unreviewed, from{" "}
+        {marker.imageCount} images in {marker.sequenceCount} sequences
+        {marker.flags.length > 0 ? ` [${marker.flags.join(", ")}]` : ""}.
+      </Tooltip>
+    </Marker>
+  );
 }
 
 function AssetMarker(props: {
@@ -335,6 +375,9 @@ export interface OsmMapProps {
   /** Manually placed assets of the active inventory session. */
   inventoryAssets: AssetMapMarker[];
   selectedAssetId: string | null;
+  /** Automatically located assets of the selected auto job (own layer). */
+  autoAssets: AutoAssetMarker[];
+  onAutoAssetClick: (id: string) => void;
   onPlacementClick: (pair: LatLngPair) => void;
   onAssetMarkerClick: (id: string) => void;
   /** Restored map view for a reopened workspace (mount-time only). */
@@ -404,6 +447,14 @@ export function OsmMap(props: OsmMapProps) {
             selected={marker.id === props.selectedAssetId}
             interactive={markersInteractive}
             onSelect={props.onAssetMarkerClick}
+          />
+        ))}
+        {props.autoAssets.map((marker) => (
+          <AutoAssetMarkerView
+            key={`auto-${marker.id}`}
+            marker={marker}
+            interactive={markersInteractive}
+            onSelect={props.onAutoAssetClick}
           />
         ))}
         {props.placementDraft && (

@@ -3,7 +3,12 @@ import { latLngBounds } from "leaflet";
 import type { BackendHealth } from "../../hooks/useBackendHealth";
 import { useRoiSearch } from "../../hooks/useRoiSearch";
 import { MapToolbar } from "../map/MapToolbar";
-import { OsmMap, type AssetMapMarker, type StreetShape } from "../map/OsmMap";
+import { OsmMap, type AssetMapMarker, type AutoAssetMarker, type StreetShape } from "../map/OsmMap";
+import { AutoInspectModal } from "../automatic/AutoInspectModal";
+import { AutoResultsTable } from "../automatic/AutoResultsTable";
+import { AutoRunPanel } from "../automatic/AutoRunPanel";
+import { useAutoRun } from "../automatic/useAutoRun";
+import type { AutoCandidateSummary } from "../../lib/autoApi";
 import { MapillaryPanel } from "../street-imagery/MapillaryPanel";
 import {
   RegionSummary,
@@ -142,6 +147,19 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
   const [mapView, setMapView] = useState<{ center: [number, number]; zoom: number } | null>(
     seed.seed.mapView,
   );
+  const [workflowMode, setWorkflowMode] = useState<"manual" | "automatic">("manual");
+  const autoSequenceIds = useMemo(
+    () => [...sequences.autoSelected].sort(),
+    [sequences.autoSelected],
+  );
+  const auto = useAutoRun({
+    workspaceId: seed.workspaceId,
+    backendConnected,
+    imageryRevision: search.imagerySnapshotId,
+    streetRevision: streets.snapshotId,
+    sequenceIds: autoSequenceIds,
+    pinnedSnapshotIds: store.pinnedSnapshotIds,
+  });
   const [resultsView, setResultsView] = useState<SavedResultsViewState | null>(null);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
@@ -484,6 +502,7 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
       requestedImageId: search.requestedImage?.id ?? null,
       viewerImageId: search.viewerActual.imageId,
       truncatedCount: imageryTracked?.payload.truncatedCount ?? 0,
+      autoSequenceIds,
     }),
     [
       search.status,
@@ -496,6 +515,7 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
       sequences.scope,
       sequences.filter,
       sequences.loads,
+      autoSequenceIds,
       search.requestedImage?.id,
       search.viewerActual.imageId,
       imageryTracked,
@@ -633,6 +653,72 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
     document.getElementById("map-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
+  // Candidate documents carry image ids; sequences join from the job plan.
+  const autoCandidates = useMemo<AutoCandidateSummary[]>(() => {
+    const imageToSequence = new Map<string, string>();
+    for (const group of auto.detail?.job.plan.perSequence ?? []) {
+      for (const imageId of group.imageIds) imageToSequence.set(imageId, group.sequenceId);
+    }
+    return (auto.candidates ?? []).map((candidate) => ({
+      ...candidate,
+      sequenceIds: [...new Set(candidate.imageIds.map((id) => imageToSequence.get(id)).filter((id) => id !== undefined))],
+    }));
+  }, [auto.candidates, auto.detail]);
+
+  // Automatic inventory map layer (visually distinct from manual assets).
+  const autoAssets = useMemo<AutoAssetMarker[]>(
+    () =>
+      autoCandidates
+        .filter(
+          (candidate): candidate is AutoCandidateSummary & { position: NonNullable<AutoCandidateSummary["position"]> } =>
+            candidate.status === "located" && candidate.position !== null,
+        )
+        .map((candidate) => ({
+          id: candidate.candidateId,
+          category: candidate.category,
+          position: [candidate.position.lat, candidate.position.lng],
+          uncertaintyM: candidate.position.uncertaintyM,
+          method: candidate.position.method,
+          imageCount: candidate.imageIds.length,
+          sequenceCount: candidate.sequenceIds.length,
+          flags: candidate.flags,
+        })),
+    [autoCandidates],
+  );
+
+  const [inspectedCandidate, setInspectedCandidate] = useState<AutoCandidateSummary | null>(null);
+  const inspectAutoCandidate = useCallback((candidate: AutoCandidateSummary) => {
+    setInspectedCandidate(candidate);
+  }, []);
+
+  const openAutoInManual = useCallback(
+    (candidate: AutoCandidateSummary) => {
+      if (!candidate.streetId) {
+        store.setNotice("No street is assigned to this asset — open a street manually to correct it.");
+        return;
+      }
+      const option = streetOptions.find((entry) => entry.id === candidate.streetId);
+      if (!option) {
+        store.setNotice(
+          `Street ${candidate.streetId} is not checked — check it in Streets in region first.`,
+        );
+        return;
+      }
+      if (inventoryDisabledReason !== null) {
+        store.setNotice(`The manual workflow cannot open yet: ${inventoryDisabledReason}`);
+        return;
+      }
+      setWorkflowMode("manual");
+      inventory.openStreet(option.id, option.displayName, option.streetSource);
+      scrollToInventory();
+      store.setNotice(
+        `Manual session opened for ${option.displayName}. Correct the automatic ${candidate.candidateId} ` +
+          `(${candidate.imageIds.length} evidence images) with the manual tools; the automatic version is preserved.`,
+      );
+    },
+    [inventory, inventoryDisabledReason, scrollToInventory, store, streetOptions],
+  );
+
   return (
     <main className="main-column">
       {confirmingClear && (
@@ -720,6 +806,11 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
               placementArmed={placementActive}
               placementDraft={placementActive ? (inventory.placement?.geo ?? null) : null}
               inventoryAssets={inventoryAssets}
+              autoAssets={autoAssets}
+              onAutoAssetClick={(id) => {
+                const candidate = autoCandidates.find((entry) => entry.candidateId === id);
+                if (candidate) inspectAutoCandidate(candidate);
+              }}
               selectedAssetId={
                 inventory.highlight?.sessionKey === inventory.activeKey
                   ? (inventory.highlight.assetId ?? null)
@@ -783,8 +874,43 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
           onRetryDetail={sequences.retryDetail}
           onFitSequence={fitSequence}
           canFitSequence={canFitSequence}
+          autoMode={workflowMode === "automatic"}
+          autoSelected={sequences.autoSelected}
+          onToggleAutoSequence={sequences.toggleAutoSequence}
+          onSelectAutoSequences={sequences.selectAutoSequences}
+          onClearAutoSelection={sequences.clearAutoSelection}
         />
       </section>
+      {workflowMode === "automatic" && (
+        <section className="panel auto-panel" aria-labelledby="auto-panel-title">
+          <h2 id="auto-panel-title" className="panel-title">
+            Automatic mapping
+          </h2>
+          <AutoRunPanel
+            auto={auto}
+            backendConnected={backendConnected}
+            samConfigured={health.samConfigured === true}
+            selectedSequences={autoSequenceIds.length}
+            hasDiscovery={search.everSearched}
+          />
+          <AutoResultsTable
+            candidates={autoCandidates}
+            result={auto.result}
+            error={auto.candidatesError}
+            jobId={auto.selectedJobId}
+            onInspect={inspectAutoCandidate}
+            onOpenManual={openAutoInManual}
+          />
+        </section>
+      )}
+      {inspectedCandidate && auto.selectedJobId && seed.workspaceId && (
+        <AutoInspectModal
+          workspaceId={seed.workspaceId}
+          jobId={auto.selectedJobId}
+          candidate={inspectedCandidate}
+          onClose={() => setInspectedCandidate(null)}
+        />
+      )}
       <section className="panel streets-panel" aria-labelledby="streets-panel-title">
         <h2 id="streets-panel-title" className="panel-title">
           Streets in region
@@ -815,12 +941,39 @@ export function WorkspaceContent(props: WorkspaceContentProps) {
         />
         <div className="streets-actions">
           <PreparationPanel preparation={preparation} streetTotal={streets.streets.length} />
-          <InventoryEntry
-            inventory={inventory}
-            streetOptions={streetOptions}
-            canOpen={inventoryDisabledReason === null}
-            disabledReason={inventoryDisabledReason}
-          />
+          <div className="workflow-entry">
+            <div className="scope-toggle" role="group" aria-label="Workflow mode">
+              <button
+                type="button"
+                className="toolbar-button toolbar-button--small"
+                aria-pressed={workflowMode === "manual"}
+                onClick={() => setWorkflowMode("manual")}
+              >
+                Manual
+              </button>
+              <button
+                type="button"
+                className="toolbar-button toolbar-button--small"
+                aria-pressed={workflowMode === "automatic"}
+                onClick={() => setWorkflowMode("automatic")}
+              >
+                Automatic
+              </button>
+            </div>
+            {workflowMode === "manual" ? (
+              <InventoryEntry
+                inventory={inventory}
+                streetOptions={streetOptions}
+                canOpen={inventoryDisabledReason === null}
+                disabledReason={inventoryDisabledReason}
+              />
+            ) : (
+              <p className="search-hint">
+                Automatic mode: check sequences above, then prepare and launch in the Automatic
+                mapping panel. Manual sessions stay untouched.
+              </p>
+            )}
+          </div>
         </div>
       </section>
       {inventory.isOpen && inventory.activeSession && (

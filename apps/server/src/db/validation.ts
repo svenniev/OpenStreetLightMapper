@@ -39,12 +39,25 @@ export type StorageErrorCode =
   | "SESSION_MODE_NOT_PERSISTED"
   | "ITEM_CONFLICT"
   | "ITEM_ALREADY_COMPLETE"
+  | "ITEM_CLAIMED"
   | "ITEM_NOT_FOUND"
   | "RESULT_CONFLICT"
   | "SNAPSHOT_CONFLICT"
   | "WORKSPACE_NOT_FOUND"
   | "SESSION_NOT_FOUND"
   | "ARTIFACT_NOT_FOUND"
+  | "AUTO_JOB_NOT_FOUND"
+  | "AUTO_JOB_CONFLICT"
+  | "AUTO_PLAN_REJECTED"
+  | "AUTO_ITEM_NOT_FOUND"
+  | "AUTO_ITEM_CONFLICT"
+  | "AUTO_ITEM_ALREADY_COMPLETE"
+  | "AUTO_ITEM_CLAIMED"
+  | "AUTO_OBSERVATION_CONFLICT"
+  | "AUTO_CANDIDATE_NOT_FOUND"
+  | "AUTO_CANDIDATE_CONFLICT"
+  | "AUTO_RESULT_EXISTS"
+  | "AUTO_RESULT_NOT_FOUND"
   | "DB_UNAVAILABLE";
 
 export class StorageValidationError extends Error {
@@ -57,11 +70,11 @@ export class StorageValidationError extends Error {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function fail(code: StorageErrorCode, message: string): never {
+export function fail(code: StorageErrorCode, message: string): never {
   throw new StorageValidationError(code, message);
 }
 
@@ -105,7 +118,7 @@ export function checkClientId(value: unknown, field: string): string {
   return id;
 }
 
-function checkRevision(value: unknown, field: string): number {
+export function checkRevision(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
     fail("STORAGE_BAD_REQUEST", `${field} must be a positive safe integer.`);
   }
@@ -166,7 +179,7 @@ function checkStringArray(value: unknown, field: string, maxItems: number, maxLe
   return (value as unknown[]).map((entry, index) => checkString(entry, `${field}[${index}]`, maxLength));
 }
 
-function checkIsoDate(value: unknown, field: string): string {
+export function checkIsoDate(value: unknown, field: string): string {
   const text = checkString(value, field, 40);
   if (Number.isNaN(Date.parse(text))) fail("STORAGE_BAD_REQUEST", `${field} must be an ISO date string.`);
   return text;
@@ -217,7 +230,7 @@ function checkPolygon(value: unknown, field: string): { type: "Polygon"; coordin
 // Input snapshots (immutable provider-result captures, referenced by workspaces)
 // ---------------------------------------------------------------------------
 
-export type SnapshotKind = "imagery-discovery" | "street-snapshot";
+export type SnapshotKind = "imagery-discovery" | "street-snapshot" | "auto-prepare";
 
 export interface ValidatedImageRecord {
   id: string;
@@ -958,6 +971,49 @@ export interface ValidatedItemCompletion {
   error: string | null;
   providerRequestId: string | null;
   finishedAt: string;
+  /** Claim owner completing its own item; null for unclaimed (browser) flows. */
+  owner: string | null;
+}
+
+export interface ValidatedItemClaim {
+  owner: string;
+  leaseMs: number;
+}
+
+/** Default claim lease: two minutes of exclusive inference per attempt. */
+export const ITEM_CLAIM_LEASE_MS_DEFAULT = 120000;
+/** Claim lease bounds: 1s (tests/retries) through 10 minutes. */
+export const ITEM_CLAIM_LEASE_MS_MIN = 1000;
+export const ITEM_CLAIM_LEASE_MS_MAX = 600000;
+
+export function validateItemClaim(body: unknown): ValidatedItemClaim {
+  if (!isRecord(body)) fail("STORAGE_BAD_REQUEST", "Item claim body must be an object.");
+  const record = body as Record<string, unknown>;
+  const leaseMs = record.leaseMs ?? ITEM_CLAIM_LEASE_MS_DEFAULT;
+  if (
+    typeof leaseMs !== "number" ||
+    !Number.isSafeInteger(leaseMs) ||
+    leaseMs < ITEM_CLAIM_LEASE_MS_MIN ||
+    leaseMs > ITEM_CLAIM_LEASE_MS_MAX
+  ) {
+    fail(
+      "STORAGE_BAD_REQUEST",
+      `Item claim leaseMs must be an integer ${ITEM_CLAIM_LEASE_MS_MIN}..${ITEM_CLAIM_LEASE_MS_MAX}.`,
+    );
+  }
+  return {
+    owner: checkClientId(record.owner, "owner"),
+    leaseMs: leaseMs as number,
+  };
+}
+
+/** Optional owner pointer for interrupt calls; accepts absent/empty bodies. */
+export function validateOptionalOwner(body: unknown): string | null {
+  if (body === undefined || body === null) return null;
+  if (!isRecord(body)) fail("STORAGE_BAD_REQUEST", "Item interrupt body must be an object.");
+  const owner = (body as Record<string, unknown>).owner;
+  if (owner === undefined || owner === null) return null;
+  return checkClientId(owner, "owner");
 }
 
 export function validateItemCompletion(body: unknown): ValidatedItemCompletion {
@@ -998,6 +1054,8 @@ export function validateItemCompletion(body: unknown): ValidatedItemCompletion {
   if (providerRequestId !== null && providerRequestId !== undefined) {
     checkClientId(providerRequestId, "providerRequestId");
   }
+  const owner = record.owner;
+  if (owner !== null && owner !== undefined) checkClientId(owner, "owner");
   return {
     status: status as ItemTerminalStatus,
     objects: objects.map((entry, index) => checkDetectionObject(entry, `objects[${index}]`)),
@@ -1007,6 +1065,7 @@ export function validateItemCompletion(body: unknown): ValidatedItemCompletion {
     error: (error ?? null) as string | null,
     providerRequestId: (providerRequestId ?? null) as string | null,
     finishedAt: checkIsoDate(record.finishedAt, "finishedAt"),
+    owner: (owner ?? null) as string | null,
   };
 }
 
@@ -1014,7 +1073,7 @@ export function validateItemCompletion(body: unknown): ValidatedItemCompletion {
 // Evidence artifacts (immutable raster bytes in GridFS, keyed by content hash)
 // ---------------------------------------------------------------------------
 
-export type ArtifactMime = "image/png" | "image/jpeg";
+export type ArtifactMime = "image/png" | "image/jpeg" | "image/svg+xml";
 
 export interface ValidatedArtifactMeta {
   contentHash: string;
@@ -1038,8 +1097,8 @@ export function validateArtifactMeta(value: unknown): ValidatedArtifactMeta {
     fail("STORAGE_BAD_REQUEST", "meta.contentHash must be a 64-hex SHA-256 hash.");
   }
   const mime = record.mime;
-  if (mime !== "image/png" && mime !== "image/jpeg") {
-    fail("STORAGE_BAD_REQUEST", "meta.mime must be image/png or image/jpeg.");
+  if (mime !== "image/png" && mime !== "image/jpeg" && mime !== "image/svg+xml") {
+    fail("STORAGE_BAD_REQUEST", "meta.mime must be image/png, image/jpeg, or image/svg+xml.");
   }
   for (const dimension of ["width", "height"] as const) {
     const entry = record[dimension];

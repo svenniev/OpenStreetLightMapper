@@ -77,6 +77,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Haversine distance in metres between two [lng, lat] points. Used for
+ * metre-scale spacing decisions (dense photo sequences); never multiplies
+ * degree differences as though they were metres.
+ */
+export function lngLatDistanceM(a: LngLat, b: LngLat): number {
+  const lat1 = (a[1] * Math.PI) / 180;
+  const lat2 = (b[1] * Math.PI) / 180;
+  const dLat = lat2 - lat1;
+  const dLng = ((b[0] - a[0]) * Math.PI) / 180;
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(Math.max(0, h))));
+}
+
+/**
  * Geodesic area via the Chamberlain–Duquette spherical-polygon summation.
  * Accurate for the small regions this milestone permits; never multiplies
  * degree differences as though they were metres.
@@ -302,6 +318,88 @@ export {
   haversineM,
   polylineLengthM,
 } from "./clip.js";
+
+export {
+  applyViewChain,
+  axisAngleToMatrix,
+  chainOutputDims,
+  enuToLla,
+  invertViewChain,
+  levelPoseFromCompass,
+  llaToEnu,
+  matTranspose,
+  matVec,
+  vecAdd,
+  vecCross,
+  vecDot,
+  vecNorm,
+  vecNormalize,
+  vecScale,
+  vecSub,
+  type EnuAnchor,
+  type Mat3,
+  type Vec2,
+  type Vec3,
+  type ViewChain,
+  type ViewOp,
+} from "./frames.js";
+
+export {
+  cameraRayToWorld,
+  equirectPixelToRay,
+  focalPixels,
+  maskColumnSupport,
+  normalizedToPixels,
+  perspectivePixelToRay,
+  pixelToCameraRay,
+  pixelsToNormalized,
+  poleBaseAnchorFromBox,
+  projectWorldToEquirect,
+  projectWorldToPerspective,
+  projectWorldToPixel,
+  validateCameraDescriptor,
+  DISTORTION_ABS_MAX,
+  FOCAL_MAX,
+  FOCAL_MIN,
+  MASK_SUPPORT_HALF_WIDTH_PX,
+  MASK_SUPPORT_MIN_FRACTION,
+  PANO_ASPECT_TOLERANCE,
+  PANO_POLE_LAT_LIMIT_DEG,
+  POLE_BASE_MARGIN_DEG,
+  UNDISTORT_ITERATIONS,
+  UNDISTORT_RADIUS_MAX,
+  type CameraDescriptor,
+  type CameraKind,
+  type CameraPose,
+  type CameraVerdict,
+  type EquirectangularCamera,
+  type PerspectiveCamera,
+  type PoleBaseAnchor,
+  type ProjectResult,
+  type RayResult,
+} from "./cameras.js";
+
+export {
+  checkTriangulationFit,
+  closestRayPoints,
+  distancePointToSegmentM,
+  distanceToLineM,
+  estimateUncertaintyM,
+  fitLine2DTLS,
+  projectOntoLineT,
+  triangulateRays,
+  MAX_DEPTH_M,
+  MAX_RAY_GAP_M,
+  MAX_REPROJECTION_PX,
+  MIN_DEPTH_M,
+  MIN_LOCATED_VIEWS,
+  MIN_PARALLAX_DEG,
+  type FittedLine,
+  type RayObservation,
+  type Triangulation,
+  type TriangulationCheck,
+  type Vec2Like,
+} from "./solve.js";
 
 /**
  * Milestone size limits: 25 km² polygon area plus the provider's strict bbox

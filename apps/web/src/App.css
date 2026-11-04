@@ -1331,6 +1331,171 @@
   cursor: crosshair;
 }
 
+/* Automatic mapping: hollow estimated pins, distinct from manual assets. */
+.asset-pin--auto {
+  background: transparent;
+  border-radius: 50%;
+}
+
+.asset-pin--auto-pole {
+  border: 2px solid #0e7490;
+}
+
+.asset-pin--auto-luminaire {
+  border: 2px solid #b45309;
+}
+
+.sequence-row-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.sequence-row-item .sequence-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.sequence-checkbox {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.auto-select-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin: 0.5rem 0;
+}
+
+.auto-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.auto-run-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+}
+
+.auto-plan {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.6rem 0.8rem;
+}
+
+.auto-plan-sequences {
+  margin: 0.4rem 0;
+  padding-left: 1.2rem;
+  list-style: disc;
+}
+
+.auto-results {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.auto-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.auto-table th,
+.auto-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.auto-table th {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.workflow-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.auto-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgb(0 0 0 / 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.auto-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 60rem;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.auto-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.auto-inspect-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+}
+
+.auto-inspect-stage {
+  position: relative;
+  align-self: center;
+  width: 100%;
+  max-width: 52rem;
+  background: #111;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.auto-inspect-raster {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.auto-inspect-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.auto-inspect-mask {
+  position: absolute;
+  pointer-events: none;
+}
+
 /* Narrow layouts: stack panels, keep everything reachable. */
 
 

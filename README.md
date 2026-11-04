@@ -1,30 +1,77 @@
 # OpenStreetLightMapper
 
-**AI-assisted public-lighting inventory** — Milestone 6: local database persistence
-and UI cleanup.
+**AI-assisted public-lighting inventory from street-level imagery.**
+
+**This project was made for the [2026 Meta Global AI Developer Hackathon](https://dev.meta.ai/events/global-hackathon).**
+The initial working prototype was built during one available day of the event,
+around other professional commitments, using Meta Muse as the coding agent.
+
+**[Watch the 3-minute project demo on YouTube](https://youtu.be/esxPKZEzfFs)** ·
+[Source code](https://github.com/svenniev/OpenStreetLightMapper) ·
+[Local database setup](infra/database/README.md)
+
+## Why this project
+
+As a designer of LED roadway-lighting optics and lighting installations, I need
+to understand the lighting arrangements used in different regions. Information
+about pole spacing, mounting heights, and layouts is often fragmented across
+municipalities. OpenStreetLightMapper explores whether existing street-level
+photographs can make that information easier to collect and audit.
+
+The working prototype lets users select an area, browse image sequences, detect
+poles and luminaires, review and merge observations, and save inventory
+workspaces. Automatic detection and mapping are an experimental extension;
+reliable dimensional measurements remain future work.
+
+## Built with Meta
+
+- **Meta Muse:** agentic application development from plain-language
+  specifications, followed by iterative testing and feedback. The development
+  specifications are available in [docs/specs](docs/specs).
+- **SAM 3.1 through the Meta Model API:** text-prompt segmentation of poles and
+  luminaires in selected photographs, with image evidence retained for review.
+- **Mapillary:** street-level imagery, sequence discovery, camera metadata, and
+  the MapillaryJS viewer.
+
+The application uses React, TypeScript, Express, MongoDB, and OpenStreetMap.
+It runs locally; live imagery discovery and hosted SAM inference need internet
+access and the corresponding API credentials.
+
+## Prototype status
 
 OpenStreetLightMapper is an open-source system intended to convert street-level imagery
 and map geometry into an auditable public-lighting asset inventory and a
 roadway-lighting dataset suitable for subsequent EN 13201 workflows.
 
-> This milestone persists work in named local workspaces: regions, streets,
-> imagery selections, inventory sessions, detection evidence, and immutable
-> reviewed results all survive refresh and restart via a loopback-only MongoDB.
-> Detection still runs on Mapillary photographs (SAM 3.1 text prompts, or
-> manual-only without a model key), and nothing here is EN 13201 compliant or
-> standards-certified. See [What is deferred](#what-is-deferred).
+> This milestone adds an automatic workflow beside the manual one: check
+> Mapillary sequences, freeze a bounded plan, launch once, and get a saved map
+> of estimated poles and luminaires with image evidence — executed by a durable
+> in-server worker that continues after a tab closes. After a server restart,
+> interrupted jobs require explicit resume. Automatic output is
+> explicitly **Automatically generated — not human reviewed**: estimated
+> positions with uncertainty, unresolved records where geometry is ambiguous,
+> never invented locations. The manual workflow, workspaces, and saved results
+> are preserved. Detection still runs on Mapillary photographs (SAM 3.1 text
+> prompts), and nothing here is EN 13201 compliant or standards-certified. See
+> [What is deferred](#what-is-deferred).
+
+The manual detection/review/save workflow has been exercised on real imagery.
+The automatic extension has automated tests and a real-camera-metadata geometry
+check, but its handoff does not yet establish end-to-end mapping accuracy on real
+SAM detections. See [verification and remaining limits](docs/07-handoff.md).
 
 Specifications: [docs/specs/01_OpenStreetLightMapper-Kickoff.md](docs/specs/01_OpenStreetLightMapper-Kickoff.md),
 [docs/specs/02_initial_tailoring.md](docs/specs/02_initial_tailoring.md),
 [docs/specs/03_workflow.md](docs/specs/03_workflow.md),
 [docs/specs/04_detect_to_display_inventory.md](docs/specs/04_detect_to_display_inventory.md),
 [docs/specs/05_detect_to_display_inventory_2.md](docs/specs/05_detect_to_display_inventory_2.md),
-[docs/specs/06_init_database_UI_clean.md](docs/specs/06_init_database_UI_clean.md)
+[docs/specs/06_init_database_UI_clean.md](docs/specs/06_init_database_UI_clean.md),
+[docs/specs/07_headless_mode.md](docs/specs/07_headless_mode.md)
 
 ## Requirements
 
 - **Node.js** `>= 20.19.0` (developed and verified with `v22.19.0`; Node 22 LTS recommended)
-- **npm** 10+ (lockfile is committed; install with `npm install`)
+- **npm** 10+ (lockfile is committed; install with `npm ci`)
 - **Docker Desktop** with Compose, for the local MongoDB container that stores
   workspaces (loopback-only, no authentication — see
   [infra/database/README.md](infra/database/README.md)). Without it the app opens
@@ -39,7 +86,26 @@ Specifications: [docs/specs/01_OpenStreetLightMapper-Kickoff.md](docs/specs/01_O
 ## Quick start (Windows PowerShell)
 
 ```powershell
-npm install
+git clone https://github.com/svenniev/OpenStreetLightMapper.git
+cd OpenStreetLightMapper
+npm ci
+
+# First-time setup only: preserve any existing local configuration.
+if (!(Test-Path apps\web\.env)) {
+  Copy-Item apps\web\.env.example apps\web\.env
+}
+if (!(Test-Path apps\server\.env)) {
+  Copy-Item apps\server\.env.example apps\server\.env
+}
+```
+
+Before starting the app, edit the two `.env` files: replace the Mapillary token
+placeholders and set the server-only `MODEL_API_KEY` for SAM. Keep the supplied
+local `MONGODB_URI`. To try the map without provider access, leave the unavailable
+token/key values empty rather than keeping the example placeholder strings.
+See [Configuration](#configuration) for the full variable list.
+
+```powershell
 powershell -ExecutionPolicy Bypass -File infra\database\start.ps1
 npm run dev
 ```
@@ -62,17 +128,25 @@ reopen the same workspace from the server.
 | `npm run build`    | Production build (geo package, then web + server)         |
 | `npm run typecheck`| `tsc --noEmit` in all workspaces                          |
 | `npm run lint`     | ESLint over the whole repository                          |
-| `npm run test`     | Focused unit tests in all workspaces (Node test runner)   |
+| `npm run test`     | Unit, component, geometry, and database integration tests |
 
 All commands run from the repository root and work from Windows PowerShell.
+Database integration tests require the local MongoDB container and use guarded
+`openstreetlightmapper_test*` databases, separate from saved workspaces. Provider
+calls in automated tests are mocked; tests do not establish live mapping accuracy.
 
 ## Configuration
 
-Copy the example files and adjust (never commit real secrets):
+If not already created during Quick start, copy the example files without
+overwriting existing configuration, then adjust them (never commit real secrets):
 
 ```powershell
-Copy-Item apps\web\.env.example apps\web\.env
-Copy-Item apps\server\.env.example apps\server\.env
+if (!(Test-Path apps\web\.env)) {
+  Copy-Item apps\web\.env.example apps\web\.env
+}
+if (!(Test-Path apps\server\.env)) {
+  Copy-Item apps\server\.env.example apps\server\.env
+}
 ```
 
 | Variable                        | Where          | Purpose                                                        |
@@ -99,8 +173,9 @@ does not prove server search is configured.
 > Use only a token intended for client-side use; never put a private application
 > secret in a `VITE_*` variable. Meta model calls and the `MODEL_API_KEY`
 > credential live on the Express server only — the key never enters the browser
-> bundle, logs, or responses. Explicit Test/Detect work transmits the selected
-> image bytes to Meta and spends model credits; nothing is sent implicitly.
+> bundle, logs, or responses. Test/Detect and Launch automatic mapping authorize
+> sending the selected image bytes to Meta and spending model credits. An
+> automatic job continues its authorized calls while the browser is closed.
 
 ## Workflow
 
@@ -152,7 +227,7 @@ Search results are the images returned for that query only — never complete
 coverage, never proof about streetlights. Camera positions are not lamp positions.
 A street with no available imagery is not a street without lights.
 
-**Previews are not inventory completion.** SAM sightings are candidates until a
+**Manual previews are not inventory completion.** SAM sightings are candidates until a
 human accepts, corrects (corrected output reads as SAM assisted), and groups them;
 failed or cancelled calls are never zero matches, and finishing acknowledges any
 incomplete processing. Unfinished session previews are clearly labeled with street
@@ -161,6 +236,41 @@ results** count as durable reviewed inventory — and even those are not measure
 asset positions, complete street coverage, or EN 13201 compliance. Completed
 inventory records (measurement) remain a future stage. Preparation never downloads
 full images, runs segmentation, or detects lights.
+
+### Automatic mapping
+
+Switch **Manual / Automatic** beside the inventory entry, then:
+
+1. Check sequences in the Mapillary sequences panel (inclusion is independent
+   of browsing; `Select visible` / `Clear selection` included, filtered-out
+   checks stay counted).
+2. In the **Automatic mapping** panel, choose Detect + locate or Detect only,
+   Poles + fixtures or Poles only, and a minimum image spacing (default 10 m,
+   0 disables), then **Prepare run**. Preparing fetches provider metadata and
+   freezes a bounded plan from in-RoI images only — outside-RoI members never
+   enter the plan, and dense runs skip images within the spacing of an
+   already-included image. At most 100 source images and 200 SAM calls; it
+   makes no SAM calls. Over-budget selections fail closed with exact counts.
+3. Review the displayed plan (images, estimated calls, locatable vs
+   detection-only counts, warnings) and press **Launch automatic mapping** —
+   the authorization to execute that exact plan. Double launches deduplicate
+   by idempotency key.
+4. The server worker prepares views, detects, locates, and publishes without
+   any open tab. Poll progress in the panel (phase, items, observations,
+   located count), or close the tab and reopen later. **Stop** settles the
+   current call; interrupted work resumes explicitly without blanket retries
+   of unknown-outcome calls.
+5. Located assets appear as hollow pins on the map's Automatic inventory layer
+   (with uncertainty and evidence on selection) and in the results table with
+   an Unlocated list carrying reasons. Every run publishes an immutable result
+   version, including runs with gaps or zero located poles. **Inspect** opens
+   the candidate's stored analysis views with segmentation boxes, anchor
+   points, and SAM masks overlaid; **Open in manual** starts the street's
+   manual session while preserving the automatic version. It currently does
+   not import automatic observations or masks into that manual session.
+
+The same workflow runs headless over local HTTP — see
+[docs/automatic-api.md](docs/automatic-api.md).
 
 ## Architecture
 
@@ -187,11 +297,14 @@ apps/
   server/                   Node.js + Express + TypeScript
     src/
       app.ts                Express app (health, routes, 404 handler)
+      auto/                 Automatic mapping: plan, metadata, image prep,
+                            durable worker, observations, association
       db/                   Mongoose connection, schemas, GridFS evidence, validation
       routes/               images/search, sequences/:id/images, streets/search,
                             imagery/:id, imagery/media/:handle, detection/sam,
                             workspaces, sessions, detection items, artifacts,
-                            reviewed results
+                            reviewed results, auto (prepare/jobs/stop/resume/
+                            retry/reads)
       mapillary.ts          Bounded Mapillary client (shared provider transport)
       sequences.ts          Sequence membership + batched metadata hydration
       streets.ts            Overpass adapter: eligibility, clipping, grouping
@@ -222,13 +335,20 @@ packages/
   `GET /api/imagery/media/:handle` (bounded same-origin photo bytes with validated
   redirects; unknown handles fail closed), and `POST /api/detection/sam` (one
   concept on one raster: exactly one streamed SAM 3.1 call, parsed with the
-  official `@meta-sam/parser`, wire dimensions verified before normalization).
+  official `@meta-sam/parser`, wire dimensions verified before normalization),
+  and the automatic routes (`auto/prepare`, `auto/jobs`, per-job
+  stop/resume/retry, paginated items/observations/candidates/result).
   The Vite dev server proxies `/api` to it. All provider calls share one bounded
   transport family (deadline through body reading, byte caps, stable template
   errors that never leak raw provider/viewer text, credentials, or image bytes).
+  The in-process automatic worker (one job at a time, one SAM call in flight)
+  survives tab closes; a startup sweep interrupts jobs a dead process left
+  active, and explicit resume continues them without implicit paid retries.
 - **Shared geo** (`packages/geo`): single source of truth for region validation,
   geodesic area, point-in-polygon, and segment/polygon clipping with fragment
-  measurement, used identically by client and server.
+  measurement, plus camera frames, perspective/equirectangular projection, and
+  multi-view triangulation with conservative acceptance gates — used identically
+  by client and server.
 - **Database:** Mongoose-backed MongoDB persistence (loopback-only container, see
   [infra/database/README.md](infra/database/README.md)). Named workspaces hold the
   RoI, street/imagery selections, preparation, inventory sessions, immutable
@@ -246,9 +366,10 @@ The header's backend indicator is derived live from `/api/health`
 (connected / checking / unavailable + retry) — a stopped backend produces a
 clear, recoverable state instead of a crash.
 
-The map marker shows the **Mapillary camera position** when viewer metadata supplies
+The imagery marker shows the **Mapillary camera position** when viewer metadata supplies
 coordinates — never an inferred lamp location. Failed or missing imagery never moves
-the map to fabricated coordinates.
+the map to fabricated coordinates. The separate Automatic inventory layer uses
+estimated asset positions and explicitly distinguishes them from camera markers.
 
 ## Current limitations
 
@@ -285,15 +406,24 @@ the map to fabricated coordinates.
 - Preparation references the shared in-RoI image pool by ID with
   `imageAssociation: "pending"` — no image-to-street matching is performed, and no
   sequence is assumed to cover any street.
-- Inventory previews are human-reviewed candidates, not measurements: poles and
+- Manual inventory previews are human-reviewed candidates, not measurements: poles and
   luminaires are counted separately (never summed as "streetlights"); placements are
   manual approximations or explicitly unknown; heights, mounting, power, spacing, and
   arrangement are not assessed. Demo positions live on a schematic diagram and are
   never geographic. There is no Publish, Export, or EN 13201 function.
-- Detection is bounded: at most ten inference views per run (crops included), at most
+- Manual detection is bounded: at most ten inference views per run (crops included), at most
   twenty model calls per batch, one call at a time, one concept per request. Masks
   are shown for inspection; only rectangles enter review geometry. Precision/recall
   in the prompt check cover the reviewed sample only.
+- Automatic runs are bounded: at most 100 source images and 200 SAM calls per job
+  (application defaults, not provider limits), one SAM call in flight globally,
+  one flat analysis view per image (recipe v1: 2048 px long side, JPEG q90).
+  Mapped positions need at least three distinct source images with useful
+  baseline (≥2 m), parallax (≥5°), range (≤80 m), sensitivity (≤3 m), and
+  reprojection within 1% of the view diagonal; two-view hypotheses stay
+  unresolved. Poles less than 10 m apart are flagged as possible duplicates,
+  never auto-merged. Thresholds are stored with each job (see
+  [docs/07-handoff.md](docs/07-handoff.md)).
 - Seeded work areas are camera paths, not streets: the street list shows no road
   length for them, and inventory labels them unverified end to end (entry, Detect,
   Inventory, Results). Camera polylines are never used for street length or spacing.
@@ -312,12 +442,14 @@ the map to fabricated coordinates.
   attribution and controls. Imagery use is subject to Mapillary's terms — the
   repository license does not license third-party imagery or map data.
 - Detection via the Meta Model API (SAM 3.1); model use is subject to Meta's terms.
-  Explicit Test/Detect work transmits the selected image bytes to Meta and spends
-  model credits. Parsing uses the official `@meta-sam/parser` package.
+  Test/Detect and Launch automatic mapping transmit selected image bytes to Meta
+  and spend model credits. Parsing uses the official `@meta-sam/parser` package.
 
-## Future inventory principles (documented, not implemented)
+## Inventory principles and future measurement work
 
-Recorded here as product direction for later milestones; none of this is built yet:
+These principles guide the existing observation/review workflow and future
+measurement features. Their presence here is not a claim that all measurement
+capabilities have been implemented:
 
 - Separate physical poles, attached luminaires, road segments, imagery observations,
   and reviewed asset records.
@@ -339,9 +471,9 @@ Recorded here as product direction for later milestones; none of this is built y
 
 ## What is deferred
 
-Automated collection, satellite/aerial integration, district boundaries, geocoding
-search, bulk download, vector-tile ingestion, automatic subdivision, completed
-pole/luminaire records, height/spacing calculations, EN 13201 assessment, exports,
+Satellite/aerial integration, district boundaries, geocoding search, bulk
+download, vector-tile ingestion, automatic subdivision, completed pole/luminaire
+records, height/spacing calculations, EN 13201 assessment, exports,
 authentication, payments, cloud deployment, workspace deletion, and a general
 settings framework — all intentionally absent. Coverage overlays and exhaustive
 large-area retrieval need a separately specified strategy. Box/point-assisted

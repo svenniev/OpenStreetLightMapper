@@ -234,6 +234,7 @@ describe("workspace serialization", () => {
         requestedImageId: "img-1",
         viewerImageId: "img-1",
         truncatedCount: 0,
+        autoSequenceIds: ["seq-1", "seq-gone"],
       },
       streetSnapshotId: "sn-b",
       streetSelection: {
@@ -275,6 +276,7 @@ describe("workspace serialization", () => {
     assert.equal(seed.imagery?.requestedImageId, "img-1");
     assert.equal(seed.sequences.selectedSequenceId, "seq-1");
     assert.deepEqual(seed.sequences.loads["seq-1"].memberIds, ["img-1"]);
+    assert.deepEqual(seed.sequences.autoSequenceIds, ["seq-1", "seq-gone"]);
     assert.deepEqual(seed.streets.checkedIds, ["street-1"]);
     assert.equal(seed.preparation.runState, "prepared");
     assert.equal(seed.activeSessionKey, "street-1");
@@ -300,6 +302,7 @@ describe("workspace serialization", () => {
           requestedImageId: null,
           viewerImageId: null,
           truncatedCount: 0,
+          autoSequenceIds: [],
         },
         streetSnapshotId: null,
         streetSelection: {

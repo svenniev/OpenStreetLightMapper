@@ -232,7 +232,7 @@ export function createSessionsRouter(): express.Router {
       const sessionKey = checkClientId(req.params.sessionKey, "sessionKey");
       const session = await InventorySessionModel().findOne(
         { workspaceId, sessionKey },
-        { _id: 1 },
+        { _id: 1, revision: 1 },
       );
       if (!session) {
         sendStorageError(res, "SESSION_NOT_FOUND", "Unknown session.");
@@ -266,6 +266,22 @@ export function createSessionsRouter(): express.Router {
           );
         }
         res.json({ resultId: existing.resultId, deduplicated: true });
+        return;
+      }
+      // Pin the result to the acknowledged revision: content built from newer
+      // edits must not attach to an older revision. Idempotent retries of an
+      // already-created result pass through the check above.
+      if (session.revision !== input.sessionRevision) {
+        res.status(409).json({
+          error: {
+            code: "REVISION_CONFLICT",
+            message:
+              `Session changed since this result was built (stored revision ${session.revision}, ` +
+              `result claims ${input.sessionRevision}). Re-save the session and retry with a fresh result.`,
+            retryable: false,
+            currentRevision: session.revision,
+          },
+        });
         return;
       }
       const created = await InventoryResultModel().create({

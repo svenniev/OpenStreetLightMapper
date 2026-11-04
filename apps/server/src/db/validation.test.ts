@@ -1,10 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ITEM_CLAIM_LEASE_MS_DEFAULT,
   StorageValidationError,
   validateArtifactMeta,
+  validateItemClaim,
   validateItemCompletion,
   validateItemRegistration,
+  validateOptionalOwner,
   validateResultInput,
   validateSessionInput,
   validateSnapshotInput,
@@ -322,6 +325,46 @@ describe("storage validation", () => {
         }),
       /must not carry objects/,
     );
+  });
+
+  it("validates item claims, owners, and lease bounds", () => {
+    const claim = validateItemClaim({ owner: "worker-a" });
+    assert.equal(claim.owner, "worker-a");
+    assert.equal(claim.leaseMs, ITEM_CLAIM_LEASE_MS_DEFAULT);
+    assert.equal(validateItemClaim({ owner: "worker-a", leaseMs: 5000 }).leaseMs, 5000);
+    assert.throws(() => validateItemClaim({}), /owner/);
+    assert.throws(() => validateItemClaim({ owner: "worker-a", leaseMs: 999 }), /leaseMs/);
+    assert.throws(() => validateItemClaim({ owner: "worker-a", leaseMs: 600001 }), /leaseMs/);
+
+    assert.equal(validateOptionalOwner(undefined), null);
+    assert.equal(validateOptionalOwner(null), null);
+    assert.equal(validateOptionalOwner({}), null);
+    assert.equal(validateOptionalOwner({ owner: "worker-a" }), "worker-a");
+    assert.throws(() => validateOptionalOwner({ owner: "" }), /owner/);
+
+    const completion = validateItemCompletion({
+      schemaVersion: 1,
+      status: "empty",
+      objects: [],
+      model: null,
+      truncated: false,
+      invalidDiscarded: 0,
+      error: null,
+      finishedAt: new Date().toISOString(),
+    });
+    assert.equal(completion.owner, null);
+    const owned = validateItemCompletion({
+      schemaVersion: 1,
+      status: "empty",
+      objects: [],
+      model: null,
+      truncated: false,
+      invalidDiscarded: 0,
+      error: null,
+      finishedAt: new Date().toISOString(),
+      owner: "worker-a",
+    });
+    assert.equal(owned.owner, "worker-a");
   });
 
   it("validates artifact metadata and hashes", () => {

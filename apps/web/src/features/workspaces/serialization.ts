@@ -134,6 +134,7 @@ export interface WorkspaceBodyInput {
     requestedImageId: string | null;
     viewerImageId: string | null;
     truncatedCount: number;
+    autoSequenceIds: string[];
   };
   streetSnapshotId: string | null;
   streetSelection: {
@@ -431,6 +432,7 @@ export interface RestoredWorkspaceSeed {
     scope: SequenceScope;
     filter: SequenceFilter;
     loads: Record<string, SequenceLoadInfo>;
+    autoSequenceIds: string[];
   };
   streets: {
     status: StreetsStatus;
@@ -525,6 +527,11 @@ export function restoreWorkspaceSeed(
     scope: scope === "whole" ? "whole" : ("inside" as SequenceScope),
     filter: (typeof filter === "string" ? filter : "all") as SequenceFilter,
     loads: restoreLoads(imagerySelection.loads),
+    autoSequenceIds: Array.isArray(imagerySelection.autoSequenceIds)
+      ? (imagerySelection.autoSequenceIds as unknown[]).filter(
+          (entry): entry is string => typeof entry === "string",
+        )
+      : [],
   };
 
   const streetStatus = STREET_STATUSES.includes(streetSelection.status as StreetsStatus)
