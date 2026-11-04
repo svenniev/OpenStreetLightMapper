@@ -19,6 +19,7 @@ export interface InventoryStepProps {
   session: WorkflowSession;
   stale: boolean;
   onOpenResults: () => void;
+  resultSave: { onSave: () => void; saving: boolean; error: string | null } | null;
 }
 
 function supportText(asset: InventoryAsset): string {
@@ -157,9 +158,12 @@ export function InventoryStep(props: InventoryStepProps) {
       )}
       {processing.views > 0 && (
         <p className="search-hint">
-          Processing: {processing.succeededViews} of {processing.views} views produced results
+          Processing: {processing.succeededViews} of {processing.views} views fully produced results
+          {processing.partialViews > 0 ? ` · ${processing.partialViews} partial` : ""}
           {processing.failedViews > 0 ? ` · ${processing.failedViews} failed` : ""}
           {processing.unprocessedViews > 0 ? ` · ${processing.unprocessedViews} unprocessed` : ""}
+          {processing.truncatedItems > 0 ? ` · ${processing.truncatedItems} truncated` : ""}
+          {processing.interruptedItems > 0 ? ` · ${processing.interruptedItems} interrupted` : ""}
           {processing.concepts.length > 0 ? ` · concepts: ${processing.concepts.join("; ")}` : ""}.
         </p>
       )}
@@ -415,10 +419,39 @@ export function InventoryStep(props: InventoryStepProps) {
               {session.mode === "demo" ? "Open demo results preview" : "Open results preview"}
             </button>
           )}
+          {finished && session.mode === "manual" && props.resultSave && (
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={stale || props.resultSave.saving}
+              title={
+                stale
+                  ? "Stale sessions cannot save — restart the preview."
+                  : "Persist an immutable reviewed-result version with its evidence."
+              }
+              onClick={props.resultSave.onSave}
+            >
+              {props.resultSave.saving ? "Saving result…" : "Save reviewed result"}
+            </button>
+          )}
         </div>
+        {session.mode === "manual" && session.savedResultRefs.length > 0 && (
+          <p className="search-status" role="status">
+            Saved versions: {session.savedResultRefs.length} (latest{" "}
+            {session.savedResultRefs[session.savedResultRefs.length - 1].createdAt}).
+            {session.draftAfterResult
+              ? " Later edits opened a draft — finish and save again to version it."
+              : " This preview matches the latest saved version."}
+          </p>
+        )}
         {finishError && (
           <p className="search-status error-text" role="alert">
             {finishError}
+          </p>
+        )}
+        {props.resultSave?.error && (
+          <p className="search-status error-text" role="alert">
+            {props.resultSave.error}
           </p>
         )}
         {assessment.blockers.length > 0 && (

@@ -52,20 +52,13 @@
   background: var(--error);
 }
 
-.layout {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 1rem;
-  padding: 1rem 1.25rem 1.5rem;
-  align-items: start;
-}
-
 .main-column {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   min-width: 0;
+  padding: 1rem 1.25rem 1.5rem;
 }
 
 .workspace {
@@ -73,6 +66,7 @@
   grid-template-columns: 3fr 2fr;
   gap: 1rem;
   min-width: 0;
+  align-items: start;
 }
 
 .map-column {
@@ -102,11 +96,17 @@
   background: #e2e8f0;
 }
 
-.settings-sidebar {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.75rem;
+.streets-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+@media (max-width: 1100px) {
+  .streets-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .settings-placeholder {
@@ -182,7 +182,7 @@
 }
 
 .mapillary-container {
-  height: 408px;
+  height: clamp(280px, 36vw, 440px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: #0f172a;
@@ -1333,11 +1333,7 @@
 
 /* Narrow layouts: stack panels, keep everything reachable. */
 
-@media (max-width: 1100px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+
 
 @media (max-width: 800px) {
   .app-header {
@@ -1621,4 +1617,159 @@ button.evidence-thumb {
   margin: 0.25rem 0;
   padding-left: 1.25rem;
   font-size: 0.85rem;
+}
+
+/* Milestone 06: workspace shell, completion, run history, result editing. */
+
+.header-workspace,
+.header-save,
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.header-actions {
+  margin-left: auto;
+}
+
+@media (max-width: 1100px) {
+  .app-header {
+    flex-wrap: wrap;
+  }
+
+  .header-actions {
+    margin-left: 0;
+  }
+}
+
+.workspace-menu {
+  position: relative;
+}
+
+.workspace-menu-panel {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 40;
+  min-width: 22rem;
+  max-width: min(32rem, 90vw);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 0.5rem 1.5rem rgba(15, 23, 42, 0.18);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.workspace-menu-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.save-banner {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.save-banner--failed,
+.save-banner--conflict {
+  color: var(--error);
+}
+
+.workspace-empty {
+  padding: 2rem 1.25rem;
+}
+
+.batch-completion,
+.run-history {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.retry-save {
+  white-space: nowrap;
+}
+
+.result-occurrences {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+@media (max-width: 800px) {
+  .workspace-menu-panel {
+    min-width: 0;
+    width: calc(100vw - 1.5rem);
+  }
+}
+
+/* Settings drawer: right-side dialog with tabs. */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.drawer-dialog {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(30rem, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -0.5rem 0 1.5rem rgba(15, 23, 42, 0.18);
+  padding: 1rem 1.25rem 1.5rem;
+  overflow-y: auto;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.drawer-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+
+.drawer-tab {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.drawer-tab--active {
+  background: var(--surface);
+  outline: 2px solid #0e7490;
+  outline-offset: -2px;
+}
+
+.settings-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }

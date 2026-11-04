@@ -39,6 +39,17 @@ export interface UsePreparationOptions {
   sequenceRefs: SequenceRef[];
   detailLoading: boolean;
   drawingActive: boolean;
+  /**
+   * Restored preparation for a reopened workspace (remount per workspace).
+   * The live fingerprint recomputes from restored inputs; a matching plan
+   * stays prepared instead of flashing stale.
+   */
+  initial?: {
+    runState: PreparationState;
+    plan: PreparationPlan | null;
+    failedStreetIds: string[];
+    failureReasons: Record<string, string>;
+  } | null;
 }
 
 export interface PreparationProgress {
@@ -60,10 +71,13 @@ function yieldToEventLoop(): Promise<void> {
  * silently adopts retried provider data.
  */
 export function usePreparation(options: UsePreparationOptions) {
-  const [runState, setRunState] = useState<PreparationState>("not_started");
-  const [plan, setPlan] = useState<PreparationPlan | null>(null);
-  const [failedStreetIds, setFailedStreetIds] = useState<string[]>([]);
-  const [failureReasons, setFailureReasons] = useState<Record<string, string>>({});
+  const initial = options.initial ?? null;
+  const [runState, setRunState] = useState<PreparationState>(initial?.runState ?? "not_started");
+  const [plan, setPlan] = useState<PreparationPlan | null>(initial?.plan ?? null);
+  const [failedStreetIds, setFailedStreetIds] = useState<string[]>(initial?.failedStreetIds ?? []);
+  const [failureReasons, setFailureReasons] = useState<Record<string, string>>(
+    initial?.failureReasons ?? {},
+  );
   const [progress, setProgress] = useState<PreparationProgress | null>(null);
 
   const runIdRef = useRef(0);

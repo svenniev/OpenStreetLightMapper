@@ -8,6 +8,9 @@ export interface PlaceStepProps {
   sessions: InventorySessions;
   session: WorkflowSession;
   stale: boolean;
+  onReturnToInventory: () => void;
+  /** Scroll/focus the main map when a real placement is armed. */
+  onGoToMap: () => void;
 }
 
 function placementText(session: WorkflowSession, assetId: string): string {
@@ -155,7 +158,9 @@ export function PlaceStep(props: PlaceStepProps) {
               className="toolbar-button toolbar-button--small"
               disabled={stale || !selected || selected.observationIds.length === 0}
               onClick={() => {
-                if (selected) sessions.armPlacement(selected.id);
+                if (!selected) return;
+                sessions.armPlacement(selected.id);
+                if (session.mode === "manual") props.onGoToMap();
               }}
             >
               Place on map
@@ -214,6 +219,13 @@ export function PlaceStep(props: PlaceStepProps) {
                   onClick={sessions.cancelPlacement}
                 >
                   Cancel placement
+                </button>
+                <button
+                  type="button"
+                  className="toolbar-button toolbar-button--small"
+                  onClick={props.onReturnToInventory}
+                >
+                  Return to inventory
                 </button>
               </div>
             </div>

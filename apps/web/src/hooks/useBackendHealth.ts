@@ -5,6 +5,8 @@ export type BackendConnection = "checking" | "connected" | "unavailable";
 
 export interface BackendHealth {
   connection: BackendConnection;
+  /** Local database readiness (connected/connecting/unavailable). Null while unknown. */
+  dbState: "connected" | "connecting" | "unavailable" | null;
   /** Server-side Mapillary search token present (configured, not verified). Null while unknown. */
   searchConfigured: boolean | null;
   /** Server-side SAM key present (configured, not verified). Null while unknown. */
@@ -20,6 +22,7 @@ export interface BackendHealth {
  */
 export function useBackendHealth(pollMs = 30_000): BackendHealth {
   const [connection, setConnection] = useState<BackendConnection>("checking");
+  const [dbState, setDbState] = useState<BackendHealth["dbState"]>(null);
   const [searchConfigured, setSearchConfigured] = useState<boolean | null>(null);
   const [samConfigured, setSamConfigured] = useState<boolean | null>(null);
   const [samModel, setSamModel] = useState("sam-3.1");
@@ -34,6 +37,12 @@ export function useBackendHealth(pollMs = 30_000): BackendHealth {
       const health = await fetchHealth(controller.signal);
       if (controller.signal.aborted) return;
       setConnection(health.status === "ok" ? "connected" : "unavailable");
+      const dbReported = health.database?.state;
+      setDbState(
+        dbReported === "connected" || dbReported === "connecting" || dbReported === "unavailable"
+          ? dbReported
+          : null,
+      );
       const configured = health.providers?.mapillarySearch?.configured;
       setSearchConfigured(typeof configured === "boolean" ? configured : null);
       const sam = health.providers?.samDetection;
@@ -42,6 +51,7 @@ export function useBackendHealth(pollMs = 30_000): BackendHealth {
     } catch {
       if (controller.signal.aborted) return;
       setConnection("unavailable");
+      setDbState(null);
       setSearchConfigured(null);
       setSamConfigured(null);
     }
@@ -62,5 +72,5 @@ export function useBackendHealth(pollMs = 30_000): BackendHealth {
     void check();
   }, [check]);
 
-  return { connection, searchConfigured, samConfigured, samModel, retry };
+  return { connection, dbState, searchConfigured, samConfigured, samModel, retry };
 }

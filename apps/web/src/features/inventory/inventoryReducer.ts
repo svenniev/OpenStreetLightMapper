@@ -1,8 +1,4 @@
-import {
-  DEFAULT_CONCEPTS,
-  MAX_RUNS_RETAINED,
-  MAX_VIEWS_PER_RUN,
-} from "./inventoryTypes";
+import { DEFAULT_CONCEPTS, MAX_VIEWS_PER_RUN } from "./inventoryTypes";
 import type {
   AssetCategory,
   AssetPlacement,
@@ -68,6 +64,7 @@ export type InventoryAction =
   | { type: "SOURCES_CHOOSE"; images: SourceImage[]; views: SourceView[]; samplingNote: string | null }
   | { type: "VIEW_ADD_CROP"; view: SourceView }
   | { type: "VIEW_SET_REVIEWED"; viewId: string; fullyReviewed: boolean }
+  | { type: "VIEW_SET_ARTIFACT"; viewId: string; artifactId: string }
   | { type: "CONCEPT_UPDATE"; id: string; patch: Partial<Pick<ConceptPrompt, "text" | "categoryIntent" | "enabled">> }
   | { type: "CONCEPT_ADD"; concept: ConceptPrompt }
   | { type: "CONCEPT_REMOVE"; id: string }
@@ -88,11 +85,20 @@ export type InventoryAction =
           | "finishedAt"
           | "requestId"
           | "attempts"
+          | "truncated"
+          | "invalidDiscarded"
+          | "artifactId"
+          | "supersedes"
+          | "resultSaved"
+          | "registered"
         >
       >;
     }
   | { type: "RUN_FINISH"; runId: string; finishedAt: string; cancelled: boolean }
   | { type: "RUN_REOPEN"; runId: string }
+  | { type: "RUN_ADD_ITEMS"; runId: string; items: DetectionItem[] }
+  | { type: "INTERRUPT_ITEMS"; runId: string | null; finishedAt: string }
+  | { type: "RESULT_SAVED"; resultId: string; sessionRevision: number; createdAt: string }
   | { type: "TEST_STAGE"; runId: string; itemId: string }
   | { type: "TEST_CLEAR" }
   | { type: "SAM_REPLACE"; observations: InventoryObservation[] }
@@ -133,6 +139,8 @@ export function createSession(init: SessionInit): WorkflowSession {
     runCounter: 0,
     stagedTest: null,
     finishedPreview: null,
+    savedResultRefs: [],
+    draftAfterResult: false,
   };
 }
 
@@ -470,16 +478,33 @@ export function buildPreviewResult(session: WorkflowSession, finishedAt: string)
         : "Manual preview — no model detections were used.",
     "Positions are manually placed approximations, or explicitly unknown.",
     "Heights, mounting details, power, spacing, and arrangement were not assessed.",
-    "Temporary session preview — not saved.",
+    "Unsaved preview — use Save reviewed result to keep it durably.",
   ];
   if (session.context.streetSource === "manual-work-area") {
     limitations.push("Street assignment unverified — a manual imagery work area, not an OpenStreetMap street.");
   }
   if (deferred > 0) limitations.push(`${deferred} deferred observation${deferred === 1 ? " remains" : "s remain"} unresolved.`);
   if (unplaced > 0) limitations.push(`${unplaced} asset${unplaced === 1 ? " has" : "s have"} no position.`);
-  if (processing.failedViews > 0 || processing.unprocessedViews > 0) {
+  if (processing.failedViews > 0 || processing.unprocessedViews > 0 || processing.partialViews > 0) {
     limitations.push(
-      `Incomplete image processing: ${processing.succeededViews} of ${processing.views} views produced results.`,
+      `Incomplete image processing: ${processing.succeededViews} of ${processing.views} views fully produced results` +
+        (processing.partialViews > 0 ? ` (${processing.partialViews} partial)` : "") +
+        ".",
+    );
+  }
+  if (processing.truncatedItems > 0) {
+    limitations.push(
+      `${processing.truncatedItems} detection${processing.truncatedItems === 1 ? " result was" : " results were"} truncated at the provider object cap; output is partial, not complete.`,
+    );
+  }
+  if (processing.interruptedItems > 0) {
+    limitations.push(
+      `${processing.interruptedItems} detection${processing.interruptedItems === 1 ? " was" : "s were"} interrupted and never automatically retried.`,
+    );
+  }
+  if (processing.invalidDiscarded > 0) {
+    limitations.push(
+      `${processing.invalidDiscarded} provider object${processing.invalidDiscarded === 1 ? " was" : "s were"} discarded as invalid during parsing.`,
     );
   }
   return {
@@ -514,30 +539,100 @@ function unconfirm(asset: InventoryAsset): InventoryAsset {
   return asset.confirmed ? { ...asset, confirmed: false } : asset;
 }
 
+export type ViewConceptOutcome = "usable" | "failed" | "pending" | "missing";
+
+export interface ViewConceptState {
+  conceptId: string;
+  conceptText: string;
+  outcome: ViewConceptOutcome;
+  item: DetectionItem | null;
+}
+
+/**
+ * Latest batch outcome per enabled concept for one view. A view is complete
+ * only when every enabled concept has a usable result; retries supersede
+ * older attempts (runs are chronological), and prompt tests never count.
+ */
+export function viewConceptStates(session: WorkflowSession, viewId: string): ViewConceptState[] {
+  const latest = new Map<string, DetectionItem>();
+  for (const run of session.runs) {
+    if (run.kind !== "batch") continue;
+    for (const item of run.items) {
+      if (item.viewId === viewId) latest.set(item.conceptId, item);
+    }
+  }
+  return session.concepts
+    .filter((concept) => concept.enabled)
+    .map((concept) => {
+      const item = latest.get(concept.id) ?? null;
+      const outcome: ViewConceptOutcome = !item
+        ? "missing"
+        : item.status === "succeeded" || item.status === "empty"
+          ? "usable"
+          : item.status === "failed" || item.status === "cancelled" || item.status === "interrupted"
+            ? "failed"
+            : "pending";
+      return { conceptId: concept.id, conceptText: concept.text, outcome, item };
+    });
+}
+
+export type ViewCompletion = "succeeded" | "partial" | "failed" | "unprocessed";
+
+export function assessViewCompletion(session: WorkflowSession, viewId: string): ViewCompletion {
+  const states = viewConceptStates(session, viewId);
+  if (states.length === 0) return "unprocessed";
+  const usable = states.filter((state) => state.outcome === "usable").length;
+  const failed = states.filter((state) => state.outcome === "failed").length;
+  if (usable === states.length) return "succeeded";
+  if (usable === 0 && failed === 0) return "unprocessed";
+  if (usable === 0) return "failed";
+  return "partial";
+}
+
 /** Per-view batch outcome summary for previews and results. */
 export function summarizeProcessing(session: WorkflowSession): SessionPreviewResult["processing"] {
   const views = session.manifest?.viewIds ?? session.viewOrder;
   const concepts = new Set<string>();
-  const succeeded = new Set<string>();
-  const failed = new Set<string>();
   for (const run of session.runs) {
     if (run.kind !== "batch") continue;
-    for (const item of run.items) {
-      concepts.add(item.conceptText);
-      if (item.status === "succeeded" || item.status === "empty") succeeded.add(item.viewId);
-      else if (item.status === "failed" || item.status === "cancelled") failed.add(item.viewId);
-    }
+    for (const item of run.items) concepts.add(item.conceptText);
   }
-  for (const viewId of succeeded) failed.delete(viewId);
+  // Latest item per (view, concept) across batch runs: retries supersede, so
+  // warning counts never double-count an attempt chain.
+  const latest = new Map<string, DetectionItem>();
+  for (const run of session.runs) {
+    if (run.kind !== "batch") continue;
+    for (const item of run.items) latest.set(`${item.viewId} ${item.conceptId}`, item);
+  }
+  let truncatedItems = 0;
+  let interruptedItems = 0;
+  let invalidDiscarded = 0;
+  for (const item of latest.values()) {
+    if (item.truncated) truncatedItems += 1;
+    if (item.status === "interrupted") interruptedItems += 1;
+    invalidDiscarded += item.invalidDiscarded;
+  }
   const manifestViews = views.filter((viewId) => session.views[viewId]);
-  const unprocessed = manifestViews.filter(
-    (viewId) => !succeeded.has(viewId) && !failed.has(viewId),
-  ).length;
+  let succeededViews = 0;
+  let partialViews = 0;
+  let failedViews = 0;
+  let unprocessedViews = 0;
+  for (const viewId of manifestViews) {
+    const completion = assessViewCompletion(session, viewId);
+    if (completion === "succeeded") succeededViews += 1;
+    else if (completion === "partial") partialViews += 1;
+    else if (completion === "failed") failedViews += 1;
+    else unprocessedViews += 1;
+  }
   return {
     views: manifestViews.length,
-    succeededViews: manifestViews.filter((viewId) => succeeded.has(viewId)).length,
-    failedViews: manifestViews.filter((viewId) => failed.has(viewId)).length,
-    unprocessedViews: unprocessed,
+    succeededViews,
+    failedViews,
+    unprocessedViews,
+    partialViews,
+    truncatedItems,
+    interruptedItems,
+    invalidDiscarded,
     concepts: [...concepts],
   };
 }
@@ -965,6 +1060,15 @@ function applyDomain(session: WorkflowSession, action: InventoryAction): Workflo
       };
     }
 
+    case "VIEW_SET_ARTIFACT": {
+      const view = session.views[action.viewId];
+      if (!view || view.artifactId === action.artifactId) return session;
+      return {
+        ...session,
+        views: { ...session.views, [action.viewId]: { ...view, artifactId: action.artifactId } },
+      };
+    }
+
     case "CONCEPT_UPDATE": {
       const index = session.concepts.findIndex((concept) => concept.id === action.id);
       if (index < 0) return session;
@@ -1001,7 +1105,9 @@ function applyDomain(session: WorkflowSession, action: InventoryAction): Workflo
     case "RUN_START": {
       if (session.mode !== "manual") return session;
       if (session.runs.some((run) => run.runId === action.run.runId)) return session;
-      const runs = [...session.runs, action.run].slice(-MAX_RUNS_RETAINED);
+      // Durable history is never sliced: the UI renders a bounded page and
+      // offers "show more", while every run persists with its outcomes.
+      const runs = [...session.runs, action.run];
       return { ...session, runs, runCounter: session.runCounter + 1 };
     }
 
@@ -1038,6 +1144,66 @@ function applyDomain(session: WorkflowSession, action: InventoryAction): Workflo
         position === index ? { ...run, finishedAt: null, cancelled: false } : run,
       );
       return { ...session, runs };
+    }
+
+    case "RUN_ADD_ITEMS": {
+      if (session.mode !== "manual") return session;
+      const index = session.runs.findIndex((run) => run.runId === action.runId);
+      if (index < 0 || action.items.length === 0) return session;
+      const run = session.runs[index];
+      const known = new Set(run.items.map((item) => item.itemId));
+      for (const item of action.items) {
+        if (known.has(item.itemId) || item.status !== "queued") return session;
+        known.add(item.itemId);
+      }
+      const runs = session.runs.map((entry, position) =>
+        position === index ? { ...entry, items: [...entry.items, ...action.items] } : entry,
+      );
+      return { ...session, runs };
+    }
+
+    case "INTERRUPT_ITEMS": {
+      let changed = false;
+      const runs = session.runs.map((run) => {
+        if (action.runId !== null && run.runId !== action.runId) return run;
+        let runChanged = false;
+        const items = run.items.map((item) => {
+          if (item.status !== "queued" && item.status !== "preparing" && item.status !== "detecting") {
+            return item;
+          }
+          runChanged = true;
+          return {
+            ...item,
+            status: "interrupted" as const,
+            error: "Interrupted by restart or navigation — not automatically retried.",
+            finishedAt: action.finishedAt,
+          };
+        });
+        if (!runChanged) return run;
+        changed = true;
+        const finished = items.every(
+          (item) =>
+            item.status !== "queued" && item.status !== "preparing" && item.status !== "detecting",
+        );
+        return { ...run, items, finishedAt: finished ? action.finishedAt : run.finishedAt };
+      });
+      return changed ? { ...session, runs } : session;
+    }
+
+    case "RESULT_SAVED": {
+      if (session.savedResultRefs.some((ref) => ref.resultId === action.resultId)) return session;
+      return {
+        ...session,
+        savedResultRefs: [
+          ...session.savedResultRefs,
+          {
+            resultId: action.resultId,
+            sessionRevision: action.sessionRevision,
+            createdAt: action.createdAt,
+          },
+        ],
+        draftAfterResult: false,
+      };
     }
 
     case "TEST_STAGE": {
@@ -1103,12 +1269,44 @@ function applyDomain(session: WorkflowSession, action: InventoryAction): Workflo
 }
 
 /**
+ * Domain edits that reopen a draft after a reviewed result was saved. Review
+ * decisions, annotations, grouping, support, placement, and confirmation all
+ * move the session ahead of its last saved version.
+ */
+const DRAFT_ACTIONS: ReadonlySet<InventoryAction["type"]> = new Set([
+  "OBS_DECIDE",
+  "OBS_EDIT",
+  "OBS_ADD",
+  "OBS_SET_RECT",
+  "ASSET_CREATE",
+  "ASSET_ADD_OBS",
+  "ASSET_REMOVE_OBS",
+  "ASSET_SPLIT",
+  "ASSET_MERGE",
+  "ASSET_REMOVE",
+  "SUPPORT_ATTACH",
+  "SUPPORT_DETACH",
+  "PLACE",
+  "ASSET_CONFIRM",
+]);
+
+/**
  * Every domain mutation except step navigation invalidates a finished
- * snapshot: later edits reopen review until the user finishes again.
+ * snapshot: later edits reopen review until the user finishes again. Edits
+ * after a saved reviewed result additionally open a draft; the prior result
+ * stays available as a historical version.
  */
 export function inventoryReducer(session: WorkflowSession, action: InventoryAction): WorkflowSession {
   const next = applyDomain(session, action);
   if (next === session) return session;
   if (action.type === "SET_STEP" || action.type === "FINISH") return next;
-  return next.finishedPreview ? { ...next, finishedPreview: null } : next;
+  let out = next.finishedPreview ? { ...next, finishedPreview: null } : next;
+  if (
+    DRAFT_ACTIONS.has(action.type) &&
+    out.savedResultRefs.length > 0 &&
+    !out.draftAfterResult
+  ) {
+    out = { ...out, draftAfterResult: true };
+  }
+  return out;
 }

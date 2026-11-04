@@ -18,10 +18,8 @@ export interface StreetPanelProps {
   retrievedAt: string | null;
   hasRegion: boolean;
   workflowStatuses: Map<string, StreetWorkflowStatus>;
-  /** Streets with a valid completed inventory result (none this milestone). */
+  /** Streets with at least one server-acknowledged reviewed result. */
   resultsAvailable: Set<string>;
-  /** Streets whose Results open a temporary session preview instead. */
-  previewResults?: Set<string>;
   /** True when the list is demo-seeded, not Overpass data. */
   seeded: boolean;
   /** Prebuilt demo seed, or null when seeding is impossible (no sequences). */
@@ -41,7 +39,6 @@ function StreetRow({
   focused,
   workflowStatus,
   resultsEnabled,
-  resultsPreview,
   onToggleChecked,
   onToggleFocus,
   onOpenResults,
@@ -51,16 +48,13 @@ function StreetRow({
   focused: boolean;
   workflowStatus: StreetWorkflowStatus;
   resultsEnabled: boolean;
-  resultsPreview: boolean;
   onToggleChecked: (checked: boolean) => void;
   onToggleFocus: () => void;
   onOpenResults: () => void;
 }) {
   const resultsTitle = !resultsEnabled
-    ? "Available after inventory mapping is complete."
-    : resultsPreview
-      ? "Open session preview results (temporary, not saved)."
-      : "Open completed inventory results.";
+    ? "Available after a reviewed result is saved."
+    : "Open saved inventory results.";
   return (
     <li className={`street-row${checked ? "" : " street-row--muted"}`}>
       <input
@@ -100,10 +94,8 @@ function StreetRow({
         title={resultsTitle}
         aria-label={
           resultsEnabled
-            ? resultsPreview
-              ? `Open session preview results for ${street.displayName}`
-              : `Open inventory results for ${street.displayName}`
-            : `Results for ${street.displayName}: available after inventory mapping is complete`
+            ? `Open saved inventory results for ${street.displayName}`
+            : `Results for ${street.displayName}: available after a reviewed result is saved`
         }
         onClick={onOpenResults}
       >
@@ -237,7 +229,6 @@ export function StreetPanel(props: StreetPanelProps) {
             focused={props.focusedId === street.id}
             workflowStatus={props.workflowStatuses.get(street.id) ?? "not_prepared"}
             resultsEnabled={props.resultsAvailable.has(street.id)}
-            resultsPreview={props.previewResults?.has(street.id) ?? false}
             onToggleChecked={(checked) => props.onToggleChecked(street.id, checked)}
             onToggleFocus={() => props.onToggleFocus(street.id)}
             onOpenResults={() => props.onOpenResults(street.id)}

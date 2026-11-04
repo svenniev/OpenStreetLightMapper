@@ -84,6 +84,8 @@ export interface ObservationProvenance {
   prompt: string;
   categoryIntent: AssetCategory | "uncertain";
   runId: string;
+  /** Session-scoped detection item backing this sighting (mask/artifact join). */
+  itemId: string;
   requestId: string;
   /** Provider object ID: local to its request, not a global pole identity. */
   providerObjectId: string;
@@ -190,6 +192,11 @@ export interface SourceView {
   width: number;
   height: number;
   mediaHandle: string;
+  /**
+   * Durable evidence raster in local artifact storage; null until the view's
+   * raster is uploaded. Survives handle expiry and server restarts.
+   */
+  artifactId: string | null;
   fullyReviewed: boolean;
 }
 
@@ -229,7 +236,8 @@ export type DetectionItemStatus =
   | "succeeded"
   | "empty"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted";
 
 export const DETECTION_ITEM_STATUS_LABELS: Record<DetectionItemStatus, string> = {
   queued: "Queued",
@@ -239,6 +247,7 @@ export const DETECTION_ITEM_STATUS_LABELS: Record<DetectionItemStatus, string> =
   empty: "No matches",
   failed: "Failed",
   cancelled: "Cancelled",
+  interrupted: "Interrupted — not automatically retried",
 };
 
 /** One parsed model object, normalized to the inference raster. */
@@ -264,8 +273,20 @@ export interface DetectionItem {
   model: string | null;
   error: string | null;
   attempts: number;
+  /** Provider returned more objects than the cap; output is partial. */
+  truncated: boolean;
+  /** Raw provider objects dropped as invalid during parsing. */
+  invalidDiscarded: number;
+  /** Durable evidence raster for this inference; null until uploaded. */
+  artifactId: string | null;
+  /** Previous attempt this item supersedes; null for first attempts. */
+  supersedes: string | null;
   /** True once the result entered observations; blocks double imports. */
   imported: boolean;
+  /** False while a completed result still needs durable item persistence. */
+  resultSaved: boolean;
+  /** True once the item input was registered on the server. */
+  registered: boolean;
   startedAt: string | null;
   finishedAt: string | null;
 }
@@ -276,11 +297,17 @@ export interface DetectionRun {
   createdAt: string;
   finishedAt: string | null;
   cancelled: boolean;
+  /** Frozen work plan: views × concepts this run covers. */
+  viewIds: string[];
+  conceptIds: string[];
   items: DetectionItem[];
 }
 
-/** Cap on retained run history per session (oldest finished runs drop off). */
-export const MAX_RUNS_RETAINED = 5;
+/**
+ * Bounded UI history: how many runs render before "show more". Durable
+ * history is never sliced — every run persists with its outcomes.
+ */
+export const RUN_HISTORY_PAGE = 5;
 
 export type DetectionStatus =
   | { status: "idle" }
@@ -323,6 +350,16 @@ export interface WorkflowSession {
   /** Staged one-view test result awaiting import or discard. */
   stagedTest: { runId: string; itemId: string } | null;
   finishedPreview: SessionPreviewResult | null;
+  /** Durable reviewed-result versions, newest last; empty until first save. */
+  savedResultRefs: SavedResultRef[];
+  /** True when domain edits landed after the latest saved result. */
+  draftAfterResult: boolean;
+}
+
+export interface SavedResultRef {
+  resultId: string;
+  sessionRevision: number;
+  createdAt: string;
 }
 
 export interface SessionPreviewAsset {
@@ -347,6 +384,14 @@ export interface SessionPreviewProcessing {
   succeededViews: number;
   failedViews: number;
   unprocessedViews: number;
+  /** Views with mixed usable/failed concept outcomes. */
+  partialViews: number;
+  /** Items whose provider output was truncated at the object cap. */
+  truncatedItems: number;
+  /** Items interrupted and never automatically retried. */
+  interruptedItems: number;
+  /** Provider objects dropped as invalid across all items. */
+  invalidDiscarded: number;
   concepts: string[];
 }
 

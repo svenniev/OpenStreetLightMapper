@@ -52,6 +52,17 @@ export interface UseSequencesOptions {
   mergeHydratedImages: (records: ImageResult[]) => number;
   requestViewerImage: (id: string) => void;
   viewerActual: ViewerActual;
+  /**
+   * Restored browsing state for a reopened workspace (remount per
+   * workspace). Seeds selection/loads without re-requesting details.
+   */
+  initial?: {
+    selectedSequenceId: string | null;
+    selectedUngroupedId: string | null;
+    scope: SequenceScope;
+    filter: SequenceFilter;
+    loads: Record<string, SequenceLoadInfo>;
+  } | null;
 }
 
 const DISCOVERY_INFO: SequenceLoadInfo = {
@@ -77,17 +88,38 @@ interface CachedDetail {
  * replacement discards dependent state and aborts outstanding work.
  */
 export function useSequences(options: UseSequencesOptions) {
-  const [selectedSequenceId, setSelectedSequenceId] = useState<string | null>(null);
-  const [selectedUngroupedId, setSelectedUngroupedId] = useState<string | null>(null);
-  const [scope, setScope] = useState<SequenceScope>("inside");
-  const [filter, setFilter] = useState<SequenceFilter>("all");
+  const initial = options.initial ?? null;
+  const [selectedSequenceId, setSelectedSequenceId] = useState<string | null>(
+    initial?.selectedSequenceId ?? null,
+  );
+  const [selectedUngroupedId, setSelectedUngroupedId] = useState<string | null>(
+    initial?.selectedUngroupedId ?? null,
+  );
+  const [scope, setScope] = useState<SequenceScope>(initial?.scope ?? "inside");
+  const [filter, setFilter] = useState<SequenceFilter>(initial?.filter ?? "all");
   const [imageListOpen, setImageListOpen] = useState(false);
   const [imagePage, setImagePage] = useState(1);
-  const [loads, setLoads] = useState<Record<string, SequenceLoadInfo>>({});
+  const [loads, setLoads] = useState<Record<string, SequenceLoadInfo>>(initial?.loads ?? {});
 
   const guardRef = useRef(createSearchGuard());
   const inFlightRef = useRef(new Map<string, AbortController>());
-  const cacheRef = useRef(new Map<string, CachedDetail>());
+  // Prime the detail cache from restored loads so re-selecting a loaded
+  // sequence does not re-request what reopening already restored.
+  const cacheRef = useRef(
+    (() => {
+      const cache = new Map<string, CachedDetail>();
+      for (const [sequenceId, info] of Object.entries(initial?.loads ?? {})) {
+        if (info.memberIds) {
+          cache.set(sequenceId, {
+            memberIds: info.memberIds,
+            membershipComplete: info.membershipStatus === "complete",
+            info,
+          });
+        }
+      }
+      return cache;
+    })(),
+  );
 
   const roiRef = useRef(options.roi);
   roiRef.current = options.roi;
@@ -106,8 +138,13 @@ export function useSequences(options: UseSequencesOptions) {
   }, [options.pool]);
 
   // RoI replacement/clear discards dependent lists and aborts outstanding work.
+  // Change-detector form: StrictMode's second mount pass sees the same key
+  // and skips, so restored browsing state survives remounts.
   const roiKey = options.roi?.id ?? null;
+  const lastRoiKeyRef = useRef<number | null>(roiKey);
   useEffect(() => {
+    if (roiKey === lastRoiKeyRef.current) return;
+    lastRoiKeyRef.current = roiKey;
     for (const controller of inFlightRef.current.values()) controller.abort();
     inFlightRef.current.clear();
     cacheRef.current.clear();
@@ -330,6 +367,7 @@ export function useSequences(options: UseSequencesOptions) {
     selectedUngroupedId,
     selectedGroup,
     selectedLoad,
+    loads,
     selectedMembers,
     scopedMembers,
     unresolvedIds,

@@ -4,6 +4,8 @@ import {
   allDemoObservations,
 } from "./demoFixtures.js";
 import type {
+  AssetCategory,
+  DetectionItem,
   InventoryObservation,
   SourceImage,
   SourceView,
@@ -11,6 +13,7 @@ import type {
 } from "./inventoryTypes.js";
 import {
   assessFinish,
+  assessViewCompletion,
   assetOf,
   buildPreviewResult,
   confirmChecks,
@@ -101,6 +104,7 @@ function sourceView(viewId: string, imageId: string, crop: SourceView["crop"] = 
     width: crop ? 512 : 2048,
     height: crop ? 512 : 1024,
     mediaHandle: `h-${viewId}`,
+    artifactId: null,
     fullyReviewed: false,
   };
 }
@@ -122,6 +126,7 @@ function samObs(id: string, origin: "sam-text" | "sam-assisted" = "sam-text"): I
       prompt: "street light pole",
       categoryIntent: "pole",
       runId: "run-1",
+      itemId: "run-1-item-1",
       requestId: "req-1",
       providerObjectId: "0",
       confidence: 0.9,
@@ -130,6 +135,37 @@ function samObs(id: string, origin: "sam-text" | "sam-assisted" = "sam-text"): I
     mode: "manual",
     decision: "pending",
     note: "",
+  };
+}
+
+function runItem(
+  itemId: string,
+  viewId: string,
+  conceptId: string,
+  conceptText = "street light pole",
+  categoryIntent: AssetCategory = "pole",
+): DetectionItem {
+  return {
+    itemId,
+    requestId: `r-${itemId}`,
+    viewId,
+    conceptId,
+    conceptText,
+    categoryIntent,
+    status: "queued",
+    objects: [],
+    model: null,
+    error: null,
+    attempts: 0,
+    truncated: false,
+    invalidDiscarded: 0,
+    artifactId: null,
+    supersedes: null,
+    imported: false,
+    resultSaved: true,
+    registered: true,
+    startedAt: null,
+    finishedAt: null,
   };
 }
 
@@ -421,24 +457,135 @@ describe("source and run provenance", () => {
         createdAt: "2026-11-03T12:00:00.000Z",
         finishedAt: null,
         cancelled: false,
+        viewIds: ["view-1", "view-2"],
+        conceptIds: ["concept-pole"],
         items: [
-          { itemId: "a", requestId: "r-a", viewId: "view-1", conceptId: "concept-pole", conceptText: "street light pole", categoryIntent: "pole", status: "queued", objects: [], model: null, error: null, attempts: 0, imported: false, startedAt: null, finishedAt: null },
-          { itemId: "b", requestId: "r-b", viewId: "view-2", conceptId: "concept-pole", conceptText: "street light pole", categoryIntent: "pole", status: "queued", objects: [], model: null, error: null, attempts: 0, imported: false, startedAt: null, finishedAt: null },
+          runItem("a", "view-1", "concept-pole"),
+          runItem("b", "view-2", "concept-pole"),
         ],
       },
     });
     next = inventoryReducer(next, { type: "RUN_ITEM", runId: "run-1", itemId: "a", patch: { status: "succeeded", objects: [], imported: true } });
     assert.equal(incompleteRunItems(next).length, 1);
     assert.equal(assessFinish(next).needsIncompleteAck, true);
+    // Both default concepts are enabled but only the pole ran: view-1 is
+    // partial (fixture concept missing), view-2 unprocessed (pole pending).
     assert.deepEqual(summarizeProcessing(next), {
       views: 2,
-      succeededViews: 1,
+      succeededViews: 0,
       failedViews: 0,
       unprocessedViews: 1,
+      partialViews: 1,
+      truncatedItems: 0,
+      interruptedItems: 0,
+      invalidDiscarded: 0,
       concepts: ["street light pole"],
     });
     const unknown = inventoryReducer(next, { type: "RUN_ITEM", runId: "run-9", itemId: "a", patch: { status: "failed" } });
     assert.equal(unknown, next);
+  });
+
+  it("reports one successful and one failed concept as a partial view", () => {
+    let next = withManifest(1);
+    next = inventoryReducer(next, {
+      type: "RUN_START",
+      run: {
+        runId: "run-1",
+        kind: "batch",
+        createdAt: "2026-11-03T12:00:00.000Z",
+        finishedAt: null,
+        cancelled: false,
+        viewIds: ["view-1"],
+        conceptIds: ["concept-pole", "concept-fixture"],
+        items: [
+          runItem("a", "view-1", "concept-pole"),
+          runItem("b", "view-1", "concept-fixture", "street light fixture", "luminaire"),
+        ],
+      },
+    });
+    next = inventoryReducer(next, { type: "RUN_ITEM", runId: "run-1", itemId: "a", patch: { status: "succeeded", objects: [], imported: true } });
+    next = inventoryReducer(next, {
+      type: "RUN_ITEM",
+      runId: "run-1",
+      itemId: "b",
+      patch: { status: "failed", error: "boom", truncated: true, invalidDiscarded: 3 },
+    });
+    assert.equal(assessViewCompletion(next, "view-1"), "partial");
+    assert.deepEqual(summarizeProcessing(next), {
+      views: 1,
+      succeededViews: 0,
+      failedViews: 0,
+      unprocessedViews: 0,
+      partialViews: 1,
+      truncatedItems: 1,
+      interruptedItems: 0,
+      invalidDiscarded: 3,
+      concepts: ["street light pole", "street light fixture"],
+    });
+  });
+
+  it("retains every run and interrupts stranded items without auto-retry", () => {
+    let next = withManifest(1);
+    for (let index = 1; index <= 7; index += 1) {
+      next = inventoryReducer(next, {
+        type: "RUN_START",
+        run: {
+          runId: `run-${index}`,
+          kind: "test",
+          createdAt: "2026-11-03T12:00:00.000Z",
+          finishedAt: `2026-11-03T12:0${index}:00.000Z`,
+          cancelled: false,
+          viewIds: ["view-1"],
+          conceptIds: ["concept-pole"],
+          items: [],
+        },
+      });
+    }
+    assert.equal(next.runs.length, 7);
+    next = inventoryReducer(next, {
+      type: "RUN_START",
+      run: {
+        runId: "run-8",
+        kind: "batch",
+        createdAt: "2026-11-03T12:08:00.000Z",
+        finishedAt: null,
+        cancelled: false,
+        viewIds: ["view-1"],
+        conceptIds: ["concept-pole"],
+        items: [runItem("q", "view-1", "concept-pole")],
+      },
+    });
+    next = inventoryReducer(next, {
+      type: "INTERRUPT_ITEMS",
+      runId: null,
+      finishedAt: "2026-11-03T12:09:00.000Z",
+    });
+    const item = next.runs.find((run) => run.runId === "run-8")?.items[0];
+    assert.equal(item?.status, "interrupted");
+    assert.equal(next.runs.find((run) => run.runId === "run-8")?.finishedAt, "2026-11-03T12:09:00.000Z");
+    assert.equal(summarizeProcessing(next).interruptedItems, 1);
+  });
+
+  it("opens a draft on later edits and clears it when a result is saved", () => {
+    let next = inventoryReducer(manualSession(), { type: "OBS_ADD", observation: samObs("sam-1") });
+    next = inventoryReducer(next, {
+      type: "RESULT_SAVED",
+      resultId: "rs-1",
+      sessionRevision: 2,
+      createdAt: "2026-11-03T12:00:00.000Z",
+    });
+    assert.equal(next.savedResultRefs.length, 1);
+    assert.equal(next.draftAfterResult, false);
+    next = inventoryReducer(next, { type: "OBS_DECIDE", id: "sam-1", decision: "accepted" });
+    assert.equal(next.draftAfterResult, true);
+    next = inventoryReducer(next, {
+      type: "RESULT_SAVED",
+      resultId: "rs-2",
+      sessionRevision: 3,
+      createdAt: "2026-11-03T12:01:00.000Z",
+    });
+    assert.equal(next.savedResultRefs.length, 2);
+    assert.equal(next.draftAfterResult, false);
   });
 
   it("marks model masks stale when the annotation is manually changed", () => {
@@ -551,7 +698,7 @@ describe("finish assessment and preview", () => {
     assert.equal(preview.counts.luminaires, 1);
     assert.equal(preview.counts.placed, 2);
     assert.equal(preview.temporary, true);
-    assert.ok(preview.limitations.some((line) => line.includes("not saved")));
+    assert.ok(preview.limitations.some((line) => line.includes("Save reviewed result")));
     const finished = inventoryReducer(next, { type: "FINISH", result: preview });
     assert.equal(finished.finishedPreview?.finishedAt, "2026-11-03T12:00:00.000Z");
     const edited = inventoryReducer(finished, { type: "OBS_EDIT", id: "demo-obs-01", description: "changed" });

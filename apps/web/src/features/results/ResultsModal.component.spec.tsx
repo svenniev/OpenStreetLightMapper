@@ -6,7 +6,12 @@ import type {
   SourceView,
 } from "../inventory/inventoryTypes";
 import type { ViewMedia } from "../inventory/useViewMedia";
-import { ResultsModal, type ResultsEvidence } from "./ResultsModal";
+import {
+  ResultsModal,
+  type ResultOccurrenceEditing,
+  type ResultsEvidence,
+  type SavedResultMeta,
+} from "./ResultsModal";
 import type { PreviewExpectation, StreetInventoryResult } from "./resultTypes";
 
 /**
@@ -165,7 +170,7 @@ function previewPayload(mode: "demo" | "manual"): SessionPreviewResult {
     streetSource: mode === "demo" ? "synthetic-demo" : "osm",
     origins: mode === "demo" ? ["demo"] : ["manual"],
     model: null,
-    processing: { views: 0, succeededViews: 0, failedViews: 0, unprocessedViews: 0, concepts: [] },
+    processing: { views: 0, succeededViews: 0, failedViews: 0, unprocessedViews: 0, partialViews: 0, truncatedItems: 0, interruptedItems: 0, invalidDiscarded: 0, concepts: [] },
     roiRevision: mode === "demo" ? null : 3,
     runId: mode === "demo" ? null : "prep-3-1-1-r1",
     fingerprint: mode === "demo" ? null : "abc123",
@@ -197,7 +202,7 @@ function previewPayload(mode: "demo" | "manual"): SessionPreviewResult {
       },
     ],
     counts: { poles: 1, luminaires: 1, placed: 0, unplaced: 2, deferred: 1, observations: 4 },
-    limitations: ["Manual preview — no model detections were used.", "Temporary session preview — not saved."],
+    limitations: ["Manual preview — no model detections were used.", "Unsaved preview — use Save reviewed result to keep it durably."],
     temporary: true,
   };
 }
@@ -219,6 +224,8 @@ function renderPreview(
     expected?: PreviewExpectation | null;
     onReturnToReview?: (() => void) | null;
     evidence?: ResultsEvidence | null;
+    savedMeta?: SavedResultMeta | null;
+    occurrenceEditing?: ResultOccurrenceEditing | null;
   } = {},
 ) {
   const payload = overrides.payload !== undefined ? overrides.payload : previewPayload(mode);
@@ -229,6 +236,8 @@ function renderPreview(
       payload={payload}
       previewExpected={overrides.expected !== undefined ? overrides.expected : previewExpected(mode)}
       evidence={overrides.evidence ?? null}
+      savedMeta={overrides.savedMeta ?? null}
+      occurrenceEditing={overrides.occurrenceEditing ?? null}
       onReturnToReview={overrides.onReturnToReview ?? null}
       onClose={() => {}}
     />,
@@ -282,14 +291,18 @@ describe("ResultsModal session previews", () => {
     payload.processing = {
       views: 2,
       succeededViews: 1,
-      failedViews: 1,
+      failedViews: 0,
       unprocessedViews: 0,
+      partialViews: 1,
+      truncatedItems: 1,
+      interruptedItems: 0,
+      invalidDiscarded: 0,
       concepts: ["street light pole"],
     };
     payload.limitations = [
       "Assisted by sam-3.1 text-prompt detection; every sighting was manually reviewed.",
       "Street assignment unverified — a manual imagery work area, not an OpenStreetMap street.",
-      "Temporary session preview — not saved.",
+      "Unsaved preview — use Save reviewed result to keep it durably.",
     ];
     const { unmount } = renderPreview("manual", { payload });
     expect(screen.getByText(/SAM-assisted session preview/)).toBeTruthy();
@@ -298,7 +311,9 @@ describe("ResultsModal session previews", () => {
     expect(screen.getByText(/Manual work area — street unverified/)).toBeTruthy();
     expect(screen.getByText(/SAM text, Manual/)).toBeTruthy();
     expect(screen.getByText(/model sam-3\.1/)).toBeTruthy();
-    expect(screen.getByText(/1 of 2 views produced results/)).toBeTruthy();
+    expect(screen.getByText(/1 of 2 views fully produced results/)).toBeTruthy();
+    expect(screen.getByText(/1 partial/)).toBeTruthy();
+    expect(screen.getByText(/1 truncated/)).toBeTruthy();
     unmount();
   });
 
@@ -319,6 +334,7 @@ describe("ResultsModal session previews", () => {
         prompt: "street light pole",
         categoryIntent: "pole",
         runId: "run-1",
+        itemId: "run-1-item-1",
         requestId: "req-1",
         providerObjectId: "0",
         confidence: 0.9,
@@ -339,6 +355,7 @@ describe("ResultsModal session previews", () => {
       width: 1000,
       height: 500,
       mediaHandle: "handle-img-1",
+      artifactId: null,
       fullyReviewed: false,
     };
     renderPreview("manual", {
@@ -366,6 +383,64 @@ describe("ResultsModal session previews", () => {
     expect(screen.getByText(/Pole asset-1/)).toBeTruthy();
     fireEvent.click(screen.getByText("Return to review"));
     expect(onReturnToReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("edits occurrence labels and unconfirms assets on live previews only", () => {
+    const observation: InventoryObservation = {
+      id: "obs-1",
+      imageId: "img-1",
+      viewId: null,
+      category: "pole",
+      description: "a pole",
+      imageRegion: null,
+      mask: null,
+      maskStale: false,
+      origin: "manual",
+      provenance: null,
+      mode: "manual",
+      decision: "accepted",
+      note: "old label",
+    };
+    const evidence: ResultsEvidence = {
+      observations: { "obs-1": observation },
+      views: {},
+      viewMedia: readyViewMedia("img-1", "handle-img-1"),
+    };
+    const updateNote = vi.fn();
+    const unconfirmAsset = vi.fn();
+    const { unmount } = renderPreview("manual", {
+      evidence,
+      occurrenceEditing: { updateNote, unconfirmAsset },
+    });
+    fireEvent.click(screen.getAllByText("View evidence")[0]);
+    const input = screen.getByLabelText("Label") as HTMLInputElement;
+    expect(input.value).toBe("old label");
+    expect(screen.getByText("Save label")).toHaveProperty("disabled", true);
+    fireEvent.change(input, { target: { value: "pole A" } });
+    fireEvent.click(screen.getByText("Save label"));
+    expect(updateNote).toHaveBeenCalledWith("obs-1", "pole A");
+    fireEvent.click(screen.getByText("Unconfirm asset"));
+    expect(unconfirmAsset).toHaveBeenCalledWith("asset-1");
+    unmount();
+
+    // Historical saved versions never offer editing.
+    const onSelectVersion = vi.fn();
+    renderPreview("manual", {
+      evidence,
+      occurrenceEditing: { updateNote, unconfirmAsset },
+      savedMeta: {
+        resultId: "r1",
+        createdAt: "2026-11-03T12:00:00.000Z",
+        history: [{ resultId: "r1", sessionRevision: 2, createdAt: "2026-11-03T12:00:00.000Z" }],
+        draftAfterResult: true,
+        onSelectVersion,
+      },
+    });
+    expect(screen.getByText(/This result is saved as v1/)).toBeTruthy();
+    expect(screen.getByText(/Draft changes since save\./)).toBeTruthy();
+    fireEvent.click(screen.getAllByText("View evidence")[0]);
+    expect(screen.queryByText("Save label")).toBeNull();
+    expect(screen.queryByText("Unconfirm asset")).toBeNull();
   });
 
   it("refuses mismatched preview identity without showing assets", () => {

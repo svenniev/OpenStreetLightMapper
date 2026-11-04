@@ -1,25 +1,18 @@
 import { useState } from "react";
 import type { RoiSearch } from "../../hooks/useRoiSearch";
-import { MAPILLARY_CLIENT_TOKEN, OSM_TILE_URL_IS_DEFAULT } from "../../lib/config";
 import { formatArea, formatRetrievedAt, warningMessage } from "../../lib/search";
-import { PreparationPanel } from "../preparation/PreparationPanel";
-import type { Preparation } from "../preparation/usePreparation";
-import { InventoryEntry, type StreetOption } from "../inventory/InventoryEntry";
-import type { InventorySessions } from "../inventory/useInventorySessions";
 import type { SamStatus } from "../inventory/useSamStatus";
 
-export interface SettingsPanelProps {
+/**
+ * Workflow action sections, rendered in their owning panels (map, sequences,
+ * streets) — not in a settings sidebar. The settings drawer keeps only
+ * provider/database/developer configuration.
+ */
+export interface SearchControlsProps {
   search: RoiSearch;
   backendConnected: boolean;
   /** Null while unknown (backend unreachable). */
   searchConfigured: boolean | null;
-  streetTotal: number;
-  preparation: Preparation;
-  inventory: InventorySessions;
-  streetOptions: StreetOption[];
-  canOpenInventory: boolean;
-  inventoryDisabledReason: string | null;
-  sam: SamStatus;
 }
 
 export function SamSection({ search, sam }: { search: RoiSearch; sam: SamStatus }) {
@@ -127,7 +120,7 @@ export function SamSection({ search, sam }: { search: RoiSearch; sam: SamStatus 
   );
 }
 
-function RegionSummary({ search }: { search: RoiSearch }) {
+export function RegionSummary({ search }: { search: RoiSearch }) {
   const { roi, drawing } = search;
   if (drawing) {
     return (
@@ -162,7 +155,7 @@ function RegionSummary({ search }: { search: RoiSearch }) {
   );
 }
 
-function SearchControls(props: SettingsPanelProps) {
+export function SearchControls(props: SearchControlsProps) {
   const { search, backendConnected, searchConfigured } = props;
   const { status, roi } = search;
 
@@ -227,7 +220,7 @@ function SearchControls(props: SettingsPanelProps) {
   );
 }
 
-function SearchResults({ search }: { search: RoiSearch }) {
+export function SearchResults({ search }: { search: RoiSearch }) {
   const { status, query, warnings } = search;
   if (status === "empty") {
     return (
@@ -271,69 +264,4 @@ function SearchResults({ search }: { search: RoiSearch }) {
   );
 }
 
-export function SettingsPanel(props: SettingsPanelProps) {
-  const { search, backendConnected, searchConfigured } = props;
-  const searchStatusLabel = !backendConnected
-    ? "Unknown (backend unavailable)"
-    : searchConfigured === true
-      ? "Configured"
-      : searchConfigured === false
-        ? "Not configured"
-        : "Checking…";
-  return (
-    <div className="settings-panel">
-      <section aria-label="Region">
-        <h3 className="settings-heading">Region</h3>
-        <RegionSummary search={search} />
-      </section>
 
-      <section aria-label="Mapillary search">
-        <h3 className="settings-heading">Mapillary search</h3>
-        <SearchControls {...props} />
-        <SearchResults search={search} />
-      </section>
-
-      <section aria-label="Streets and preparation">
-        <h3 className="settings-heading">Streets &amp; preparation</h3>
-        <PreparationPanel preparation={props.preparation} streetTotal={props.streetTotal} />
-      </section>
-
-      <section aria-label="Inventory workflow">
-        <h3 className="settings-heading">Inventory workflow</h3>
-        <InventoryEntry
-          inventory={props.inventory}
-          streetOptions={props.streetOptions}
-          canOpen={props.canOpenInventory}
-          disabledReason={props.inventoryDisabledReason}
-        />
-      </section>
-
-      <section aria-label="SAM detection">
-        <h3 className="settings-heading">SAM detection</h3>
-        <SamSection search={search} sam={props.sam} />
-      </section>
-
-      <section aria-label="Provider and configuration status">
-        <h3 className="settings-heading">Status</h3>
-        <dl className="config-status">
-          <div className="config-row">
-            <dt>Mapillary viewer</dt>
-            <dd>{MAPILLARY_CLIENT_TOKEN ? "Configured" : "Not configured"}</dd>
-          </div>
-          <div className="config-row">
-            <dt>Mapillary search</dt>
-            <dd>{searchStatusLabel}</dd>
-          </div>
-          <div className="config-row">
-            <dt>Basemap</dt>
-            <dd>{OSM_TILE_URL_IS_DEFAULT ? "OpenStreetMap default tiles" : "Custom tile URL"}</dd>
-          </div>
-          <div className="config-row">
-            <dt>Database</dt>
-            <dd>Pending — no connection in this milestone</dd>
-          </div>
-        </dl>
-      </section>
-    </div>
-  );
-}

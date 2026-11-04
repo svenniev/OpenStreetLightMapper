@@ -105,7 +105,6 @@ export function MapillaryPanel({
   requestedImage,
   isActualOutsideResults,
 }: MapillaryPanelProps) {
-  const [manualId, setManualId] = useState("");
   const [viewerState, setViewerState] = useState<ViewerState>("idle");
   const [requestedId, setRequestedId] = useState<string | null>(null);
   const [actualId, setActualId] = useState<string | null>(null);
@@ -282,7 +281,7 @@ export function MapillaryPanel({
     [getQueue],
   );
 
-  // Map/list selections arrive as prop requests; manual loads use requestMove directly.
+  // Map/list/developer-tool selections arrive as prop requests.
   useEffect(() => {
     if (!requestedImage || !MAPILLARY_CLIENT_TOKEN) return;
     if (lastPropTokenRef.current === requestedImage.token) return;
@@ -325,8 +324,8 @@ export function MapillaryPanel({
       <div className="mapillary-status" role="status" aria-live="polite">
         {viewerState === "idle" && !actualId && (
           <span>
-            Select a result on the map or in the list, or enter an image ID below for a manual
-            test load.
+            Select a result on the map or in the list. Manual image-ID loads live under Settings
+            → Developer tools.
           </span>
         )}
         {viewerState === "loading" && requestedId && <span>Loading {requestedId}…</span>}
@@ -355,32 +354,6 @@ export function MapillaryPanel({
           </span>
         )}
       </div>
-
-      <form
-        className="mapillary-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void requestMove(manualId);
-        }}
-      >
-        <label htmlFor="mapillary-image-id">Manual image ID (testing)</label>
-        <div className="mapillary-form-row">
-          <input
-            id="mapillary-image-id"
-            name="mapillary-image-id"
-            type="text"
-            inputMode="text"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="e.g. p1x2…"
-            value={manualId}
-            onChange={(event) => setManualId(event.target.value)}
-          />
-          <button type="submit" disabled={viewerState === "loading"}>
-            {viewerState === "loading" ? "Loading…" : "Load image"}
-          </button>
-        </div>
-      </form>
     </div>
   );
 }

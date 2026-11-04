@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { formatRetrievedAt, warningMessage } from "../../lib/search";
+import { artifactUrlFor } from "../../lib/workspaceApi";
 import { EvidenceThumb } from "../inventory/EvidenceThumb";
 import { isDemoImageId } from "../inventory/demoScenes";
 import { mapViewRectToFull } from "../inventory/imageViews";
@@ -25,6 +26,22 @@ export interface ResultsEvidence {
   viewMedia: ViewMedia;
 }
 
+export interface SavedResultMeta {
+  resultId: string;
+  createdAt: string;
+  history: { resultId: string; sessionRevision: number; createdAt: string }[];
+  /** True when domain edits landed after this version was saved. */
+  draftAfterResult: boolean;
+  onSelectVersion: (resultId: string) => void;
+}
+
+export interface ResultOccurrenceEditing {
+  /** Persist an editable label (observation note) for one occurrence. */
+  updateNote: (obsId: string, note: string) => void;
+  /** Return an asset's observations to pending, unconfirming the asset. */
+  unconfirmAsset: (assetId: string) => void;
+}
+
 export interface ResultsModalProps {
   /** Street the modal was opened for (row identity, always known). */
   streetDisplayName: string;
@@ -33,13 +50,21 @@ export interface ResultsModalProps {
   /**
    * Supplied completed result, session preview, or null when none exists.
    * Completed results have no production producer; fixtures exercise that
-   * boundary in tests. Session previews come from the in-memory workflow.
+   * boundary in tests. Session previews come from the in-memory workflow or
+   * from a saved reviewed-result version's snapshot.
    */
   payload: unknown;
   /** Expected preview identity; required when the payload is a preview. */
   previewExpected?: PreviewExpectation | null;
   /** Session evidence for photo rendering; omitted in completed-result fixtures. */
   evidence?: ResultsEvidence | null;
+  /** Present when the payload is a server-acknowledged saved version. */
+  savedMeta?: SavedResultMeta | null;
+  /**
+   * Present for a live session preview; enables occurrence label editing and
+   * unconfirm. Historical saved versions never offer editing.
+   */
+  occurrenceEditing?: ResultOccurrenceEditing | null;
   /** Shown as "Return to review" when the workflow view is available. */
   onReturnToReview?: (() => void) | null;
   onClose: () => void;
@@ -112,6 +137,7 @@ function EvidencePhotos({
             viewMedia={evidence.viewMedia}
             rect={rect}
             label={`${observation.id} (${OBSERVATION_ORIGIN_LABELS[observation.origin]})`}
+            artifactUrl={view?.artifactId ? artifactUrlFor(view.artifactId) : null}
           />
         );
       })}
@@ -119,7 +145,83 @@ function EvidencePhotos({
   );
 }
 
-function PreviewBody({ preview, evidence }: { preview: SessionPreviewResult; evidence: ResultsEvidence | null }) {
+function OccurrenceEditor({
+  asset,
+  evidence,
+  editing,
+}: {
+  asset: SessionPreviewResult["assets"][number];
+  evidence: ResultsEvidence;
+  editing: ResultOccurrenceEditing;
+}) {
+  const members = asset.observationIds
+    .map((obsId) => evidence.observations[obsId])
+    .filter(
+      (observation): observation is InventoryObservation => Boolean(observation),
+    );
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  if (members.length === 0) return null;
+  return (
+    <div className="result-occurrences">
+      <ul className="batch-items">
+        {members.map((observation) => {
+          const draft = drafts[observation.id] ?? observation.note ?? "";
+          const dirty = draft !== (observation.note ?? "");
+          return (
+            <li key={observation.id}>
+              {observation.id} · {OBSERVATION_ORIGIN_LABELS[observation.origin]} ·{" "}
+              {observation.decision}{" "}
+              <label className="inventory-label">
+                Label
+                <input
+                  type="text"
+                  className="inventory-input"
+                  value={draft}
+                  maxLength={280}
+                  onChange={(event) =>
+                    setDrafts((current) => ({ ...current, [observation.id]: event.target.value }))
+                  }
+                />
+              </label>{" "}
+              <button
+                type="button"
+                className="link-button"
+                disabled={!dirty}
+                onClick={() => {
+                  editing.updateNote(observation.id, draft);
+                  setDrafts((current) => ({ ...current, [observation.id]: draft }));
+                }}
+              >
+                Save label
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="inventory-actions">
+        <button
+          type="button"
+          className="toolbar-button toolbar-button--small"
+          onClick={() => editing.unconfirmAsset(asset.assetId)}
+        >
+          Unconfirm asset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewBody({
+  preview,
+  evidence,
+  savedMeta,
+  occurrenceEditing,
+}: {
+  preview: SessionPreviewResult;
+  evidence: ResultsEvidence | null;
+  savedMeta: SavedResultMeta | null;
+  occurrenceEditing: ResultOccurrenceEditing | null;
+}) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const counts = preview.counts;
   const processing = preview.processing;
@@ -138,9 +240,37 @@ function PreviewBody({ preview, evidence }: { preview: SessionPreviewResult; evi
           these assignments as street inventory.
         </p>
       )}
-      <p className="search-status" role="status">
-        <strong>Not saved — temporary preview.</strong> Reloading the page loses this work.
-      </p>
+      {savedMeta ? (
+        <div className="result-version" role="status">
+          <p className="search-status">
+            This result is saved as v
+            {savedMeta.history.findIndex((entry) => entry.resultId === savedMeta.resultId) + 1} (
+            {formatRetrievedAt(savedMeta.createdAt)}).{" "}
+            {savedMeta.draftAfterResult ? "Draft changes since save." : ""}
+          </p>
+          {savedMeta.history.length > 1 && (
+            <label className="inventory-label">
+              Version
+              <select
+                className="inventory-select"
+                value={savedMeta.resultId}
+                onChange={(event) => savedMeta.onSelectVersion(event.target.value)}
+              >
+                {savedMeta.history.map((entry, index) => (
+                  <option key={entry.resultId} value={entry.resultId}>
+                    Version {index + 1} · {formatRetrievedAt(entry.createdAt)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      ) : (
+        <p className="search-status" role="status">
+          <strong>Not saved — temporary preview.</strong> Use Save reviewed result to keep it
+          durably; reloading loses unsaved work.
+        </p>
+      )}
       <dl className="config-status">
         <div className="config-row">
           <dt>Session</dt>
@@ -175,9 +305,12 @@ function PreviewBody({ preview, evidence }: { preview: SessionPreviewResult; evi
           <div className="config-row">
             <dt>Processing</dt>
             <dd>
-              {processing.succeededViews} of {processing.views} views produced results
+              {processing.succeededViews} of {processing.views} views fully produced results
+              {processing.partialViews > 0 ? ` · ${processing.partialViews} partial` : ""}
               {processing.failedViews > 0 ? ` · ${processing.failedViews} failed` : ""}
               {processing.unprocessedViews > 0 ? ` · ${processing.unprocessedViews} unprocessed` : ""}
+              {processing.truncatedItems > 0 ? ` · ${processing.truncatedItems} truncated` : ""}
+              {processing.interruptedItems > 0 ? ` · ${processing.interruptedItems} interrupted` : ""}
               {processing.concepts.length > 0 ? ` · ${processing.concepts.join("; ")}` : ""}
             </dd>
           </div>
@@ -186,7 +319,11 @@ function PreviewBody({ preview, evidence }: { preview: SessionPreviewResult; evi
       <p className="search-status" role="status">
         {counts.poles} pole{counts.poles === 1 ? "" : "s"} · {counts.luminaires} luminaire
         {counts.luminaires === 1 ? "" : "s"} (counted separately) · {counts.placed} placed ·{" "}
-        {counts.unplaced} unplaced
+        {counts.unplaced} unplaced · {counts.deferred} deferred · {counts.observations}{" "}
+        observations
+      </p>
+      <p className="search-status" role="status">
+        Inventory reviewed — session only: all listed assets confirmed by a reviewer.
       </p>
       {preview.assets.length === 0 ? (
         <p className="search-status" role="status">
@@ -236,6 +373,13 @@ function PreviewBody({ preview, evidence }: { preview: SessionPreviewResult; evi
                         {asset.imageIds.join(", ") || "none"}; review: {asset.reviewState}
                         {asset.note ? `; note: ${asset.note}` : ""}
                         {evidence && <EvidencePhotos asset={asset} evidence={evidence} />}
+                        {evidence && occurrenceEditing && !savedMeta && (
+                          <OccurrenceEditor
+                            asset={asset}
+                            evidence={evidence}
+                            editing={occurrenceEditing}
+                          />
+                        )}
                       </td>
                     </tr>
                   )}
@@ -362,7 +506,12 @@ export function ResultsModal(props: ResultsModalProps) {
         )}
 
         {isPreviewPayload && previewValidation && previewValidation.ok && (
-          <PreviewBody preview={previewValidation.preview} evidence={props.evidence ?? null} />
+          <PreviewBody
+            preview={previewValidation.preview}
+            evidence={props.evidence ?? null}
+            savedMeta={props.savedMeta ?? null}
+            occurrenceEditing={props.occurrenceEditing ?? null}
+          />
         )}
 
         {!isPreviewPayload && legacyValidation !== null && legacyValidation.ok && (

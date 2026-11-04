@@ -1,18 +1,22 @@
 import { useState } from "react";
 import type { ImageResult } from "../../lib/searchTypes";
-import { mediaUrlFor } from "../../lib/detectionClient";
 import { DetectSources, type SequenceOption } from "./DetectSources";
-import { useObservedImage } from "./EvidenceThumb";
 import { describeView } from "./imageViews";
+import {
+  assessViewCompletion,
+  viewConceptStates,
+} from "./inventoryReducer";
 import {
   DETECTION_ITEM_STATUS_LABELS,
   MAX_CALLS_PER_BATCH,
   OBSERVATION_ORIGIN_LABELS,
+  RUN_HISTORY_PAGE,
   type AssetCategory,
   type DetectionItem,
   type WorkflowSession,
 } from "./inventoryTypes";
 import { PhotoCanvas, type PhotoOverlay } from "./PhotoCanvas";
+import { useViewSourceUrl } from "./useEvidence";
 import { conceptTextError, type InventorySessions } from "./useInventorySessions";
 import type { SamStatus } from "./useSamStatus";
 import type { ViewMedia } from "./useViewMedia";
@@ -164,6 +168,60 @@ function ConceptsEditor(props: { session: WorkflowSession; sessions: InventorySe
   );
 }
 
+function RetrySaveButton(props: { sessions: InventorySessions; runId: string; itemId: string }) {
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  return (
+    <span className="retry-save">
+      <button
+        type="button"
+        className="link-button"
+        disabled={saving}
+        onClick={() => {
+          setError(null);
+          setSaving(true);
+          void props.sessions.retryItemSave(props.runId, props.itemId).then((message) => {
+            setSaving(false);
+            setError(message);
+          });
+        }}
+      >
+        {saving ? "Saving…" : "Retry save"}
+      </button>
+      {error && <span className="error-text"> {error}</span>}
+    </span>
+  );
+}
+
+function ItemOutcomeNotes(props: { sessions: InventorySessions; runId: string; item: DetectionItem }) {
+  const { item } = props;
+  const terminal =
+    item.status === "succeeded" ||
+    item.status === "empty" ||
+    item.status === "failed" ||
+    item.status === "cancelled";
+  return (
+    <>
+      {item.truncated && (
+        <span className="search-status"> · partial output (truncated at the object cap)</span>
+      )}
+      {item.invalidDiscarded > 0 && (
+        <span className="search-status"> · {item.invalidDiscarded} invalid discarded</span>
+      )}
+      {item.supersedes && <span className="search-hint"> · retry of {item.supersedes}</span>}
+      {terminal && !item.resultSaved && (
+        <span className="error-text" role="alert">
+          {" "}
+          · {item.status === "succeeded" || item.status === "empty"
+            ? "Detection completed, result not saved."
+            : "Outcome not saved."}{" "}
+          <RetrySaveButton sessions={props.sessions} runId={props.runId} itemId={item.itemId} />
+        </span>
+      )}
+    </>
+  );
+}
+
 function StagedPreview(props: {
   session: WorkflowSession;
   sessions: InventorySessions;
@@ -180,9 +238,9 @@ function StagedPreview(props: {
       })()
     : null;
   const view = staged ? session.views[staged.item.viewId] : undefined;
-  const observed = useObservedImage(view?.imageId ?? null, viewMedia);
+  const pixels = useViewSourceUrl(view ?? null, viewMedia);
   if (!staged || !view) return null;
-  const { item } = staged;
+  const { run, item } = staged;
   if (item.status !== "succeeded" && item.status !== "empty") return null;
   const overlays: PhotoOverlay[] = item.objects.map((object, index) => ({
     obsId: `staged-${object.providerObjectId}`,
@@ -199,10 +257,11 @@ function StagedPreview(props: {
         {item.objects.length === 0
           ? `No matches for “${item.conceptText}” on ${describeView(view)}. Nothing to import.`
           : `${item.objects.length} match${item.objects.length === 1 ? "" : "es"} for “${item.conceptText}” on ${describeView(view)}. Review before importing.`}
+        <ItemOutcomeNotes sessions={sessions} runId={run.runId} item={item} />
       </p>
-      {observed.status === "ready" ? (
+      {pixels.status === "ready" && pixels.url ? (
         <PhotoCanvas
-          mediaUrl={mediaUrlFor(observed.detail.media.handle)}
+          mediaUrl={pixels.url}
           alt={`Staged test result for ${describeView(view)}`}
           view={view}
           overlays={overlays}
@@ -214,6 +273,13 @@ function StagedPreview(props: {
           onMoveRect={() => undefined}
           onDisarm={() => undefined}
         />
+      ) : pixels.status === "unavailable" ? (
+        <p className="search-status error-text" role="alert">
+          Source image unavailable locally.{" "}
+          <button type="button" className="link-button" onClick={() => pixels.refetch()}>
+            Refetch
+          </button>
+        </p>
       ) : (
         <p className="search-hint">Loading staged photo…</p>
       )}
@@ -372,7 +438,8 @@ function BatchPanel(props: {
   const latestBatch = [...session.runs].reverse().find((run) => run.kind === "batch");
   const finished = latestBatch?.items.filter((item) => item.status === "succeeded" || item.status === "empty").length ?? 0;
   const failedCount = latestBatch?.items.filter((item) => item.status === "failed" || item.status === "cancelled").length ?? 0;
-  const resumable = latestBatch?.items.some((item) => item.status === "failed" || item.status === "cancelled") ?? false;
+  const interruptedCount = latestBatch?.items.filter((item) => item.status === "interrupted").length ?? 0;
+  const resumable = latestBatch?.items.some((item) => item.status === "failed" || item.status === "cancelled" || item.status === "interrupted") ?? false;
 
   return (
     <div>
@@ -431,12 +498,16 @@ function BatchPanel(props: {
           <p className="search-status" role="status" aria-live="polite">
             {finished} of {latestBatch.items.length} calls produced results
             {failedCount > 0 ? ` · ${failedCount} failed or cancelled` : ""}
+            {interruptedCount > 0 ? ` · ${interruptedCount} interrupted` : ""}
             {latestBatch.cancelled ? " · partial batch (cancelled)" : ""}
-            {!latestBatch.finishedAt ? " · running…" : ""}
+            {interruptedCount > 0 && !latestBatch.finishedAt ? " · interrupted (recovery pending)" : ""}
+            {!latestBatch.finishedAt && interruptedCount === 0 ? " · running…" : ""}
           </p>
           <ul className="batch-items">
             {latestBatch.items.map((item: DetectionItem) => {
               const view = session.views[item.viewId];
+              const retryable =
+                item.status === "failed" || item.status === "cancelled" || item.status === "interrupted";
               return (
                 <li key={item.itemId}>
                   {view ? describeView(view) : item.viewId} · {item.conceptText} —{" "}
@@ -444,6 +515,21 @@ function BatchPanel(props: {
                   {(item.status === "succeeded" || item.status === "empty") &&
                     ` (${item.objects.length} match${item.objects.length === 1 ? "" : "es"})`}
                   {item.status === "failed" && item.error ? `: ${item.error}` : ""}
+                  {item.status === "interrupted" && item.error ? `: ${item.error}` : ""}
+                  <ItemOutcomeNotes sessions={sessions} runId={latestBatch.runId} item={item} />
+                  {retryable && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="link-button"
+                        disabled={stale || busy}
+                        onClick={() => setBatchError(sessions.retryItem(latestBatch.runId, item.itemId))}
+                      >
+                        Retry
+                      </button>
+                    </>
+                  )}
                 </li>
               );
             })}
@@ -456,11 +542,130 @@ function BatchPanel(props: {
                 disabled={stale || busy}
                 onClick={() => setBatchError(sessions.retryFailed(latestBatch.runId))}
               >
-                {latestBatch.items.some((item) => item.status === "failed") ? "Retry failed" : "Resume cancelled"}
+                {latestBatch.items.some((item) => item.status === "failed")
+                  ? "Retry failed"
+                  : "Resume run"}
               </button>
             </div>
           )}
         </div>
+      )}
+      <CompletionSection session={session} sessions={sessions} stale={stale} busy={busy} />
+    </div>
+  );
+}
+
+function CompletionSection(props: {
+  session: WorkflowSession;
+  sessions: InventorySessions;
+  stale: boolean;
+  busy: boolean;
+}) {
+  const { session } = props;
+  const views = session.viewOrder.map((viewId) => session.views[viewId]).filter(Boolean);
+  if (views.length === 0 || session.concepts.length === 0) return null;
+  const states = new Map<string, ReturnType<typeof viewConceptStates>>();
+  const completion = new Map<string, ReturnType<typeof assessViewCompletion>>();
+  let partial = 0;
+  let outstanding = 0;
+  for (const view of views) {
+    const rows = viewConceptStates(session, view.viewId);
+    states.set(view.viewId, rows);
+    const assessment = assessViewCompletion(session, view.viewId);
+    completion.set(view.viewId, assessment);
+    if (assessment !== "succeeded" && rows.length > 0) {
+      partial += 1;
+      outstanding += rows.filter((row) => row.outcome !== "usable").length;
+    }
+  }
+  return (
+    <div className="batch-completion">
+      <h4 className="settings-heading">Completion</h4>
+      <p className="search-status" role="status">
+        {partial === 0
+          ? "All views complete."
+          : `${partial} partial view${partial === 1 ? "" : "s"} · ${outstanding} outstanding concept${outstanding === 1 ? "" : "s"}.`}
+      </p>
+      {partial > 0 && (
+        <ul className="batch-items">
+          {views
+            .filter((view) => completion.get(view.viewId) !== "succeeded")
+            .map((view) => (
+              <li key={view.viewId}>
+                {describeView(view)} ({completion.get(view.viewId)}):{" "}
+                {(states.get(view.viewId) ?? [])
+                  .map((row) =>
+                    row.outcome === "usable"
+                      ? `“${row.conceptText}” complete`
+                      : `“${row.conceptText}” ${row.outcome}${
+                          row.item ? ` (${DETECTION_ITEM_STATUS_LABELS[row.item.status]})` : ""
+                        }`,
+                  )
+                  .join(" · ")}
+              </li>
+            ))}
+        </ul>
+      )}
+      {partial > 0 && (
+        <p className="search-hint">
+          Retry individual items above or re-run the outstanding concepts with “Detect selected
+          views”.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RunHistoryPanel(props: { session: WorkflowSession; stale: boolean }) {
+  const { session } = props;
+  const [open, setOpen] = useState(false);
+  const [visible, setVisible] = useState(RUN_HISTORY_PAGE);
+  if (session.runs.length <= 1) return null;
+  const runs = [...session.runs].reverse();
+  return (
+    <div className="run-history">
+      <button
+        type="button"
+        className="link-button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? "Hide run history" : `Show run history (${session.runs.length} runs)`}
+      </button>
+      {open && (
+        <>
+          <ul className="batch-items">
+            {runs.slice(0, visible).map((run) => {
+              const ok = run.items.filter(
+                (item) => item.status === "succeeded" || item.status === "empty",
+              ).length;
+              const failed = run.items.filter(
+                (item) => item.status === "failed" || item.status === "cancelled" || item.status === "interrupted",
+              ).length;
+              const interrupted = run.items.some((item) => item.status === "interrupted");
+              return (
+                <li key={run.runId}>
+                  {run.kind === "test" ? "Test" : "Batch"} · started{" "}
+                  {new Date(run.createdAt).toLocaleString()} · {ok}/{run.items.length} results
+                  {failed > 0 ? ` · ${failed} failed, cancelled, or interrupted` : ""}
+                  {run.cancelled ? " · cancelled" : ""}
+                  {interrupted ? " · interrupted" : ""}
+                </li>
+              );
+            })}
+          </ul>
+          {visible < runs.length && (
+            <div className="inventory-actions">
+              <button
+                type="button"
+                className="toolbar-button toolbar-button--small"
+                onClick={() => setVisible((value) => value + RUN_HISTORY_PAGE)}
+              >
+                Show more ({runs.length - visible} remaining)
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -592,6 +797,7 @@ export function DetectReal(props: DetectRealProps) {
             busy={busy}
           />
           <BatchPanel session={session} sessions={sessions} sam={props.sam} stale={stale} busy={busy} />
+          <RunHistoryPanel session={session} stale={stale} />
           <EvaluationPanel session={session} sessions={sessions} stale={stale} />
         </>
       )}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { mediaUrlFor, measureMedia } from "../../lib/detectionClient";
+import { measureMedia } from "../../lib/detectionClient";
 import { formatCapturedDate } from "../../lib/search";
 import type { ImageResult } from "../../lib/searchTypes";
 import { DEMO_IMAGES } from "./demoFixtures";
@@ -22,16 +22,19 @@ import {
 } from "./inventoryTypes";
 import { PhotoCanvas, type PhotoOverlay } from "./PhotoCanvas";
 import { SceneCanvas, type OverlayRect } from "./SceneCanvas";
+import { useRecoveredMasks, useViewSourceUrl, type MaskFetcher } from "./useEvidence";
 import type { InventorySessions } from "./useInventorySessions";
 import type { ViewMedia } from "./useViewMedia";
 
 export interface ReviewStepProps {
   sessions: InventorySessions;
   session: WorkflowSession;
+  sessionKey: string;
   stale: boolean;
   poolImages: ImageResult[];
   onSelectImage: (id: string) => void;
   viewMedia: ViewMedia;
+  maskFetcher: MaskFetcher | null;
 }
 
 const DECISIONS: ObservationDecision[] = ["pending", "accepted", "rejected", "deferred"];
@@ -254,10 +257,12 @@ function ObservationCard(props: {
 
 function PhotoPanel(props: {
   session: WorkflowSession;
+  sessionKey: string;
   sessions: InventorySessions;
   stale: boolean;
   imageId: string;
   viewMedia: ViewMedia;
+  maskFetcher: MaskFetcher | null;
   selectedObsId: string | null;
   drawArmed: boolean;
   zoom: number;
@@ -286,10 +291,37 @@ function PhotoPanel(props: {
     setDisplayDims(null);
   }, [imageId]);
 
+  const baseView: SourceView | null =
+    (viewOverride ? session.views[viewOverride] : undefined) ??
+    (selectedViewId ? session.views[selectedViewId] : undefined) ??
+    imageViews.find((entry) => !entry.crop) ??
+    imageViews[0] ??
+    null;
+  // Reference-only probe so live pixels still load for measurement when no
+  // inference view exists; real views resolve local evidence first.
+  const probe = useMemo<SourceView>(
+    () => ({
+      viewId: `display-${imageId}`,
+      imageId,
+      fullWidth: 0,
+      fullHeight: 0,
+      orientation: 1,
+      isPano: false,
+      crop: null,
+      width: 0,
+      height: 0,
+      mediaHandle: "",
+      artifactId: null,
+      fullyReviewed: false,
+    }),
+    [imageId],
+  );
+  const pixels = useViewSourceUrl(baseView ?? probe, viewMedia);
+
   useEffect(() => {
-    if (imageViews.length > 0 || observed.status !== "ready") return;
+    if (imageViews.length > 0 || !pixels.url) return;
     let cancelled = false;
-    measureMedia(mediaUrlFor(observed.detail.media.handle))
+    measureMedia(pixels.url)
       .then((dims) => {
         if (!cancelled) setDisplayDims({ width: dims.width, height: dims.height });
       })
@@ -299,13 +331,10 @@ function PhotoPanel(props: {
     return () => {
       cancelled = true;
     };
-  }, [imageId, imageViews.length, observed]);
+  }, [imageId, imageViews.length, pixels.url]);
 
   const view: SourceView | null =
-    (viewOverride ? session.views[viewOverride] : undefined) ??
-    (selectedViewId ? session.views[selectedViewId] : undefined) ??
-    imageViews.find((entry) => !entry.crop) ??
-    imageViews[0] ??
+    baseView ??
     (displayDims
       ? {
           viewId: `display-${imageId}`,
@@ -318,10 +347,12 @@ function PhotoPanel(props: {
           width: displayDims.width,
           height: displayDims.height,
           mediaHandle: "",
+          artifactId: null,
           fullyReviewed: false,
         }
       : null);
   const isDisplayView = view !== null && view.viewId.startsWith("display-");
+  const recoveredMasks = useRecoveredMasks(onImage, props.sessionKey, props.maskFetcher);
   const overlays: PhotoOverlay[] = view
     ? onImage
         .filter((observation) =>
@@ -331,7 +362,7 @@ function PhotoPanel(props: {
           obsId: observation.id,
           label: observation.id,
           rect: observation.imageRegion ? { ...observation.imageRegion } : null,
-          mask: observation.mask,
+          mask: observation.mask ?? recoveredMasks[observation.id] ?? null,
           maskStale: observation.maskStale,
           selected: observation.id === props.selectedObsId,
           decision: observation.decision,
@@ -360,9 +391,9 @@ function PhotoPanel(props: {
           </label>
         </div>
       )}
-      {observed.status === "ready" && view ? (
+      {pixels.status === "ready" && pixels.url && view ? (
         <PhotoCanvas
-          mediaUrl={mediaUrlFor(observed.detail.media.handle)}
+          mediaUrl={pixels.url}
           alt={`Mapillary photograph ${imageId}`}
           view={view}
           overlays={overlays}
@@ -380,29 +411,37 @@ function PhotoPanel(props: {
             sessions.dispatch({ type: "OBS_SET_RECT", id: obsId, rect });
           }}
           onDisarm={props.onDisarm}
-          onMediaError={() => viewMedia.refreshImage(imageId).catch(() => undefined)}
+          onMediaError={() => pixels.refetch()}
         />
-      ) : observed.status === "failed" ? (
+      ) : pixels.status === "unavailable" ? (
         <p className="search-status error-text" role="alert">
-          The photograph failed to load: {observed.error}{" "}
-          <button
-            type="button"
-            className="link-button"
-            onClick={() => viewMedia.refreshImage(imageId).catch(() => undefined)}
-          >
-            Retry
+          Source image unavailable locally{pixels.error ? `: ${pixels.error}` : ""}.{" "}
+          <button type="button" className="link-button" onClick={() => pixels.refetch()}>
+            Refetch
           </button>
         </p>
       ) : (
         <p className="search-hint">Loading photograph…</p>
       )}
       <figcaption className="search-hint">
-        {imageId} · {observed.status === "ready" ? observed.detail.image.attribution : "…"}{" "}
+        {imageId} ·{" "}
+        {observed.status === "ready"
+          ? observed.detail.image.attribution
+          : (source?.attribution ?? "…")}{" "}
         {view ? `· ${view.width}×${view.height}${view.isPano ? " · panorama (flat view may distort objects)" : ""}` : ""}
         {source ? ` · ${source.resolution}` : ""}
         {isDisplayView ? " · reference only (not an inference view)" : " · inference view"}
+        {pixels.fromArtifact ? " · local evidence" : ""}
         {selectedObs && !selectedObs.imageRegion ? " Selected observation has no rectangle yet." : ""}{" "}
-        <a href={observed.status === "ready" ? observed.detail.image.sourceUrl : undefined} target="_blank" rel="noreferrer">
+        <a
+          href={
+            observed.status === "ready"
+              ? observed.detail.image.sourceUrl
+              : (source?.sourceUrl ?? undefined)
+          }
+          target="_blank"
+          rel="noreferrer"
+        >
           Source
         </a>{" "}
         ·{" "}
@@ -543,10 +582,12 @@ export function ReviewStep(props: ReviewStepProps) {
           <PhotoPanel
             key={effectiveImageId}
             session={session}
+            sessionKey={props.sessionKey}
             sessions={sessions}
             stale={stale}
             imageId={effectiveImageId}
             viewMedia={props.viewMedia}
+            maskFetcher={props.maskFetcher}
             selectedObsId={selectedObsId}
             drawArmed={drawArmed}
             zoom={zoom}

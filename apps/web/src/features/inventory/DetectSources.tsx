@@ -223,6 +223,7 @@ function SourceSelection(props: DetectSourcesProps) {
           width: dims.width,
           height: dims.height,
           mediaHandle: detail.media.handle,
+          artifactId: null,
           fullyReviewed: false,
         });
       } catch (error) {
@@ -427,6 +428,7 @@ function CropAdder(props: {
         width: pixels.w,
         height: pixels.h,
         mediaHandle: target.mediaHandle,
+        artifactId: null,
         fullyReviewed: false,
       },
     });

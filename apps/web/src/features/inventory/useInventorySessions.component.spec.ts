@@ -64,6 +64,7 @@ function sourceView(viewId: string, imageId: string) {
     width: 800,
     height: 600,
     mediaHandle: `h-${viewId}`,
+    artifactId: null,
     fullyReviewed: false,
   };
 }
@@ -472,9 +473,14 @@ describe("useInventorySessions", () => {
         error = result.current.retryFailed("run-1");
       });
       expect(error).toBeNull();
+      // Retry appends a superseding attempt; the cancelled item keeps its outcome.
       await waitFor(() => {
-        expect(result.current.activeSession?.runs[0]?.items[1]?.status).toBe("succeeded");
+        expect(result.current.activeSession?.runs[0]?.items[2]?.status).toBe("succeeded");
       });
+      expect(result.current.activeSession?.runs[0]?.items[1]?.status).toBe("cancelled");
+      expect(result.current.activeSession?.runs[0]?.items[2]?.supersedes).toBe(
+        result.current.activeSession?.runs[0]?.items[1]?.itemId,
+      );
       expect(Object.keys(result.current.activeSession?.observations ?? {})).toEqual(["obs-1", "obs-2"]);
     });
 
@@ -510,6 +516,48 @@ describe("useInventorySessions", () => {
         });
       });
       expect(result.current.activeSession?.runs[0]?.items[0]?.status).toBe("succeeded");
+    });
+
+    it("retries one item as a linked attempt and refuses superseded or usable ones", async () => {
+      let calls = 0;
+      vi.stubGlobal(
+        "fetch",
+        (async (_url: string, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as { requestId: string; view: { viewId: string } };
+          calls += 1;
+          const requestId = calls === 1 ? "wrong-request" : body.requestId;
+          return new Response(JSON.stringify(samResponse(requestId, body.view.viewId, 1)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }) as unknown as typeof fetch,
+      );
+      const { result } = renderHook(() => useInventorySessions(detectionOptions()));
+      openStreetWithSources(result);
+      act(() => {
+        result.current.dispatch({ type: "CONCEPT_UPDATE", id: "concept-fixture", patch: { enabled: false } });
+      });
+      act(() => {
+        expect(result.current.runBatch(false)).toBeNull();
+      });
+      await waitFor(() => {
+        expect(result.current.activeSession?.runs[0]?.items[0]?.status).toBe("failed");
+      });
+      const firstId = result.current.activeSession?.runs[0]?.items[0]?.itemId ?? "";
+      act(() => {
+        expect(result.current.retryItem("run-1", firstId)).toBeNull();
+      });
+      await waitFor(() => {
+        expect(result.current.activeSession?.runs[0]?.items[1]?.status).toBe("succeeded");
+      });
+      const items = result.current.activeSession?.runs[0]?.items ?? [];
+      expect(items[1]?.supersedes).toBe(firstId);
+      expect(items[0]?.status).toBe("failed");
+      // The superseded failure and the usable retry are not retryable again.
+      expect(result.current.retryItem("run-1", firstId)).toContain("supersedes");
+      expect(result.current.retryItem("run-1", items[1]?.itemId ?? "")).toContain("Nothing to retry");
+      expect(result.current.retryItem("run-1", "missing-item")).toContain("Nothing to retry");
+      expect(Object.keys(result.current.activeSession?.observations ?? {})).toEqual(["obs-1"]);
     });
 
     it("fails items on mismatched responses instead of attaching them", async () => {

@@ -226,9 +226,16 @@ export function validateSessionPreview(
   const processing = payload.processing;
   if (
     !isRecord(processing) ||
-    ["views", "succeededViews", "failedViews", "unprocessedViews"].some(
-      (key) => typeof processing[key] !== "number" || !Number.isInteger(processing[key]),
-    ) ||
+    [
+      "views",
+      "succeededViews",
+      "failedViews",
+      "unprocessedViews",
+      "partialViews",
+      "truncatedItems",
+      "interruptedItems",
+      "invalidDiscarded",
+    ].some((key) => typeof processing[key] !== "number" || !Number.isInteger(processing[key])) ||
     !isStringArray(processing.concepts)
   ) {
     return { ok: false, reason: "malformed preview payload" };
@@ -249,6 +256,10 @@ export function validateSessionPreview(
         succeededViews: processing.succeededViews as number,
         failedViews: processing.failedViews as number,
         unprocessedViews: processing.unprocessedViews as number,
+        partialViews: processing.partialViews as number,
+        truncatedItems: processing.truncatedItems as number,
+        interruptedItems: processing.interruptedItems as number,
+        invalidDiscarded: processing.invalidDiscarded as number,
         concepts: [...(processing.concepts as string[])],
       },
       roiRevision: expected.roiRevision,

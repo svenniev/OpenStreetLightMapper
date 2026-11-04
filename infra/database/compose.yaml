@@ -1,0 +1,29 @@
+# OpenStreetLightMapper local database (development only).
+#
+# Standalone MongoDB Community server on the loopback interface. No auth:
+# acceptable for local-only development on this machine, NOT a remotely
+# deployable setup. See README.md next to this file.
+name: openstreetlightmapper
+
+services:
+  mongodb:
+    # Pinned, tested image. Never `latest`: record upgrades in README.md.
+    image: mongo:8.0.34
+    container_name: openstreetlightmapper-mongodb
+    restart: unless-stopped
+    ports:
+      # Loopback only; host port 27018 avoids clashing with a default 27017.
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - openstreetlightmapper-mongo-data:/data/db
+    healthcheck:
+      # Real server ping through mongosh (bundled in the image).
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  openstreetlightmapper-mongo-data:
+    name: openstreetlightmapper-mongo-data

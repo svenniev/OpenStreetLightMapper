@@ -97,23 +97,27 @@ function Harness(props: {
   );
 }
 
+function stubImageryFetch(failId: string | null = null) {
+  vi.stubGlobal(
+    "fetch",
+    (async (url: string) => {
+      const imageId = url.split("/").pop() ?? "";
+      if (failId !== null && imageId === failId) return new Response("{}", { status: 404 });
+      return new Response(JSON.stringify(imageryBody(imageId)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch,
+  );
+}
+
 describe("DetectSources", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
   it("spreads, acknowledges, and freezes chosen sources with decoded dims", async () => {
-    vi.stubGlobal(
-      "fetch",
-      (async (url: string) => {
-        const imageId = url.split("/").pop() ?? "";
-        if (imageId === "img-5") return new Response("{}", { status: 404 });
-        return new Response(JSON.stringify(imageryBody(imageId)), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }) as unknown as typeof fetch,
-    );
+    stubImageryFetch("img-5");
     const dispatch = vi.fn();
     render(<Harness dispatch={dispatch} />);
     // Sequence defaults to the current viewer sequence.
@@ -141,6 +145,7 @@ describe("DetectSources", () => {
   });
 
   it("uses viewer shortcuts without admitting out-of-RoI images", () => {
+    stubImageryFetch();
     const dispatch = vi.fn();
     const { rerender } = render(<Harness dispatch={dispatch} currentImageId="img-2" />);
     fireEvent.click(screen.getByRole("button", { name: "Use current image" }));
@@ -155,6 +160,7 @@ describe("DetectSources", () => {
   });
 
   it("caps source images at ten", () => {
+    stubImageryFetch();
     const big = Array.from({ length: 11 }, (_, index) =>
       poolImage(`big-${index + 1}`, "seq-1", Date.UTC(2024, 0, 1 + index), false),
     );

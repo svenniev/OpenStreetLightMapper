@@ -4,6 +4,9 @@ import type { ImageResult, SearchResponse } from "./searchTypes";
 export interface HealthResponse {
   service: string;
   status: string;
+  database?: {
+    state?: string;
+  };
   providers?: {
     mapillarySearch?: {
       configured?: boolean;
@@ -27,13 +30,22 @@ export class ApiError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly httpStatus: number | null;
+  /** Extra error payload fields (e.g. currentRevision on conflicts). */
+  readonly data: Record<string, unknown>;
 
-  constructor(code: string, message: string, retryable: boolean, httpStatus: number | null = null) {
+  constructor(
+    code: string,
+    message: string,
+    retryable: boolean,
+    httpStatus: number | null = null,
+    data: Record<string, unknown> = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.retryable = retryable;
     this.httpStatus = httpStatus;
+    this.data = data;
   }
 }
 
@@ -51,7 +63,9 @@ function toApiError(status: number, body: unknown): ApiError {
   const code = typeof error?.code === "string" ? error.code : "SEARCH_FAILED";
   const message = typeof error?.message === "string" ? error.message : "Request failed.";
   const retryable = error?.retryable === true;
-  return new ApiError(code, message, retryable, status);
+  const data =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+  return new ApiError(code, message, retryable, status, data);
 }
 
 /**

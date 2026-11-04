@@ -107,11 +107,11 @@ export function PreparationPanel(props: PreparationPanelProps) {
             onClick={preparation.start}
             disabled={!preparation.canStart}
           >
-            Start Processing
+            Prepare selected streets
           </button>
           <p className="search-hint">
-            Prepares selected streets and available imagery for mapping. Lighting detection is
-            not available yet.
+            Prepares selected streets and available imagery for mapping. Detection runs per
+            street in the inventory workflow below.
           </p>
           {preparation.disabledReason && (
             <p className="search-hint" role="status">
@@ -126,7 +126,7 @@ export function PreparationPanel(props: PreparationPanelProps) {
           <p className="search-status" role="status" aria-live="polite">
             {runState === "prepared"
               ? `Preparation complete — ${plan.streetItems.length} street${plan.streetItems.length === 1 ? "" : "s"} ready; open the inventory workflow per street below.`
-              : "Inputs changed since preparation — the plan below is stale. Start Processing again to rebuild it."}
+              : "Inputs changed since preparation — the plan below is stale. Prepare selected streets again to rebuild it."}
           </p>
           {plan.imagePool.count === 0 && (
             <p className="search-status" role="status">

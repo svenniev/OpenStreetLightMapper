@@ -53,6 +53,92 @@ export interface UseInventorySessionsOptions {
    * unavailable (manual-only path).
    */
   prepareRaster?: (view: SourceView) => Promise<RasterUpload>;
+  /**
+   * Durable detection persistence (evidence upload, item register/complete).
+   * Absent in unit tests (memory-only queue); the app always provides it,
+   * and new paid detection is blocked while it reports unavailable.
+   */
+  persistence?: DetectionPersistence;
+  /** Restored sessions for a reopened workspace (remount per workspace). */
+  initialSessions?: Record<string, WorkflowSession>;
+}
+
+/** Evidence raster upload: exact inference bytes plus view/source identity. */
+export interface EvidenceUploadInput {
+  raster: RasterUpload;
+  view: SourceView;
+  source: { imageId: string; attribution: string; sourceUrl: string } | undefined;
+}
+
+export interface ItemRegistrationInput {
+  runId: string;
+  itemId: string;
+  kind: "test" | "batch";
+  viewId: string;
+  conceptId: string;
+  prompt: string;
+  categoryIntent: "pole" | "luminaire";
+  model: string | null;
+  viewDescriptor: Record<string, unknown>;
+  artifactId: string;
+  supersedes: string | null;
+}
+
+export interface ItemCompletionInput {
+  status: "succeeded" | "empty" | "failed" | "cancelled";
+  objects: DetectionObject[];
+  model: string | null;
+  truncated: boolean;
+  invalidDiscarded: number;
+  error: string | null;
+  providerRequestId: string | null;
+  finishedAt: string;
+}
+
+export interface RecoveredItem {
+  status: string;
+  objects: DetectionObject[];
+  model: string | null;
+  truncated: boolean;
+  invalidDiscarded: number;
+  error: string | null;
+}
+
+/**
+ * Durable detection I/O behind the queue. All methods reject with Error on
+ * transport/database failure; the queue turns that into honest item states
+ * (never a second model call, never fake success).
+ */
+export interface DetectionPersistence {
+  /** False while no workspace is open or the database is unreachable. */
+  isAvailable: () => boolean;
+  /** Human reason matching isAvailable() === false. */
+  unavailableReason: () => string;
+  /** Store the exact inference raster; resolves to the artifact ID. */
+  uploadEvidence: (input: EvidenceUploadInput) => Promise<string>;
+  /** Register an item before inference; resolves with the stored status. */
+  registerItem: (key: string, input: ItemRegistrationInput) => Promise<{ status: string }>;
+  /** Persist one terminal outcome (idempotent by runId+itemId). */
+  completeItem: (
+    key: string,
+    runId: string,
+    itemId: string,
+    completion: ItemCompletionInput,
+  ) => Promise<void>;
+  /** Full stored item for recovery, or null when unknown. */
+  fetchFullItem: (key: string, runId: string, itemId: string) => Promise<RecoveredItem | null>;
+  /** Slim history for recovery (all pages). */
+  listSlimItems: (key: string) => Promise<{ runId: string; itemId: string; status: string }[]>;
+  /** Record stranded items as interrupted (best effort, never throws). */
+  interruptServerItems: (key: string, refs: { runId: string; itemId: string }[]) => Promise<void>;
+  /** A detection outcome landed; persist the session promptly. */
+  notifySettled: (key: string) => void;
+}
+
+export interface RecoveryReport {
+  recovered: number;
+  interrupted: number;
+  clearedStaged: boolean;
 }
 
 /** Client deadline per model call: server deadline plus transport margin. */
@@ -282,6 +368,15 @@ function samFailureMessage(error: unknown): string {
   return "The SAM request failed unexpectedly.";
 }
 
+function persistenceFailureMessage(prefix: string, error: unknown): string {
+  const detail =
+    error instanceof ApiError ? error.message : error instanceof Error ? error.message : "request failed";
+  return `${prefix}: ${detail}`;
+}
+
+/** Server item statuses that end an attempt (no further transitions). */
+const TERMINAL_ITEM_STATUSES = new Set(["succeeded", "empty", "failed", "cancelled", "interrupted"]);
+
 /**
  * Multi-session inventory workflow coordinator: demo + per-street manual
  * sessions, bounded undo, staleness against the live preparation context,
@@ -290,9 +385,17 @@ function samFailureMessage(error: unknown): string {
  * explicit model call at a time, through the injected raster pipeline.
  */
 export function useInventorySessions(options: UseInventorySessionsOptions) {
-  const [sessions, setSessions] = useState<Record<string, WorkflowSession>>({});
+  const [sessions, setSessions] = useState<Record<string, WorkflowSession>>(
+    () => options.initialSessions ?? {},
+  );
   const [histories, setHistories] = useState<Record<string, HistoryEntry[]>>({});
-  const [initials, setInitials] = useState<Record<string, string>>({});
+  const [initials, setInitials] = useState<Record<string, string>>(() => {
+    const entries: Record<string, string> = {};
+    for (const [key, session] of Object.entries(options.initialSessions ?? {})) {
+      entries[key] = domainKey(session);
+    }
+    return entries;
+  });
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [placement, setPlacement] = useState<PlacementDraft | null>(null);
@@ -588,6 +691,7 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
               prompt: item.conceptText,
               categoryIntent: item.categoryIntent,
               runId,
+              itemId: item.itemId,
               requestId: item.requestId,
               providerObjectId: object.providerObjectId,
               confidence: object.confidence,
@@ -719,6 +823,172 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
           cancelled = true;
           break;
         }
+        const persistence = optionsRef.current.persistence;
+        let registered = false;
+        if (persistence) {
+          // Evidence first: no model call until the exact raster is stored
+          // and the item is registered with its input.
+          const settled = () => persistence.notifySettled(key);
+          let artifactId: string;
+          try {
+            const source = live.sources[view.imageId];
+            artifactId = await persistence.uploadEvidence({
+              raster,
+              view,
+              source: source
+                ? {
+                    imageId: source.imageId,
+                    attribution: source.attribution,
+                    sourceUrl: source.sourceUrl,
+                  }
+                : undefined,
+            });
+          } catch (error) {
+            if (queue.generation !== generation) return;
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId,
+              itemId,
+              patch: {
+                status: "failed",
+                error: `${persistenceFailureMessage("Evidence upload failed", error)}. No model call was made.`,
+                finishedAt: new Date().toISOString(),
+              },
+            });
+            settled();
+            continue;
+          }
+          if (queue.generation !== generation) return;
+          if (controller.signal.aborted) {
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId,
+              itemId,
+              patch: { status: "cancelled", finishedAt: new Date().toISOString() },
+            });
+            cancelled = true;
+            settled();
+            break;
+          }
+          dispatchTo(key, { type: "VIEW_SET_ARTIFACT", viewId: view.viewId, artifactId });
+          dispatchTo(key, { type: "RUN_ITEM", runId, itemId, patch: { artifactId } });
+          try {
+            const registration = await persistence.registerItem(key, {
+              runId,
+              itemId,
+              kind: run.kind,
+              viewId: view.viewId,
+              conceptId: item.conceptId,
+              prompt: item.conceptText,
+              categoryIntent: item.categoryIntent,
+              model: null,
+              viewDescriptor: {
+                viewId: view.viewId,
+                imageId: view.imageId,
+                width: raster.width,
+                height: raster.height,
+                fullWidth: view.fullWidth,
+                fullHeight: view.fullHeight,
+                orientation: view.orientation,
+                crop: view.crop,
+              },
+              artifactId,
+              supersedes: item.supersedes,
+            });
+            registered = true;
+            dispatchTo(key, { type: "RUN_ITEM", runId, itemId, patch: { registered: true } });
+            if (TERMINAL_ITEM_STATUSES.has(registration.status)) {
+              // A completed record already exists (crash between completion
+              // and local apply): adopt it instead of spending a model call.
+              const recovered = await persistence.fetchFullItem(key, runId, itemId).catch(() => null);
+              if (
+                recovered &&
+                (recovered.status === "succeeded" || recovered.status === "empty")
+              ) {
+                dispatchTo(key, {
+                  type: "RUN_ITEM",
+                  runId,
+                  itemId,
+                  patch: {
+                    status: recovered.status,
+                    objects: recovered.objects,
+                    model: recovered.model,
+                    truncated: recovered.truncated,
+                    invalidDiscarded: recovered.invalidDiscarded,
+                    error: null,
+                    resultSaved: true,
+                    finishedAt: new Date().toISOString(),
+                  },
+                });
+                if (run.kind === "batch") {
+                  importItemObjects(key, runId, itemId, recovered.model ?? "unknown model", recovered.objects);
+                } else {
+                  dispatchTo(key, { type: "TEST_STAGE", runId, itemId });
+                }
+              } else {
+                dispatchTo(key, {
+                  type: "RUN_ITEM",
+                  runId,
+                  itemId,
+                  patch: {
+                    status: "failed",
+                    error: "A saved result exists for this item but could not be loaded. No model call was made.",
+                    finishedAt: new Date().toISOString(),
+                  },
+                });
+              }
+              settled();
+              continue;
+            }
+          } catch (error) {
+            if (queue.generation !== generation) return;
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId,
+              itemId,
+              patch: {
+                status: "failed",
+                error: `${persistenceFailureMessage("Detection registration failed", error)}. No model call was made.`,
+                finishedAt: new Date().toISOString(),
+              },
+            });
+            settled();
+            continue;
+          }
+          if (queue.generation !== generation) return;
+          if (controller.signal.aborted) {
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId,
+              itemId,
+              patch: { status: "cancelled", resultSaved: false, finishedAt: new Date().toISOString() },
+            });
+            void persistence
+              .completeItem(key, runId, itemId, {
+                status: "cancelled",
+                objects: [],
+                model: null,
+                truncated: false,
+                invalidDiscarded: 0,
+                error: "Cancelled before inference.",
+                providerRequestId: null,
+                finishedAt: new Date().toISOString(),
+              })
+              .then(
+                () =>
+                  dispatchTo(key, {
+                    type: "RUN_ITEM",
+                    runId,
+                    itemId,
+                    patch: { resultSaved: true },
+                  }),
+                () => undefined,
+              );
+            cancelled = true;
+            settled();
+            break;
+          }
+        }
         dispatchTo(key, { type: "RUN_ITEM", runId, itemId, patch: { status: "detecting" } });
         const { signal, release } = createDeadlineSignal(SAM_CLIENT_TIMEOUT_MS, controller.signal);
         try {
@@ -745,6 +1015,26 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
             response.inputWidth !== raster.width ||
             response.inputHeight !== raster.height
           ) {
+            const finishedAt = new Date().toISOString();
+            let resultSaved = !persistence;
+            if (persistence && registered) {
+              try {
+                await persistence.completeItem(key, runId, itemId, {
+                  status: "failed",
+                  objects: [],
+                  model: response.model,
+                  truncated: false,
+                  invalidDiscarded: 0,
+                  error: "The SAM response did not match this request.",
+                  providerRequestId: item.requestId,
+                  finishedAt,
+                });
+                resultSaved = true;
+              } catch {
+                if (queue.generation !== generation) return;
+                resultSaved = false;
+              }
+            }
             dispatchTo(key, {
               type: "RUN_ITEM",
               runId,
@@ -752,41 +1042,120 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
               patch: {
                 status: "failed",
                 error: "The SAM response did not match this request.",
-                finishedAt: new Date().toISOString(),
+                resultSaved,
+                finishedAt,
               },
             });
+            persistence?.notifySettled(key);
             continue;
           }
-          const objects = response.objects.flatMap((raw) => {
+          const objects: DetectionObject[] = [];
+          let invalidDiscarded = 0;
+          for (const raw of response.objects) {
             const parsed = toDetectionObject(raw);
-            return parsed ? [parsed] : [];
-          });
+            if (parsed) objects.push(parsed);
+            else invalidDiscarded += 1;
+          }
+          const status = objects.length > 0 ? "succeeded" : "empty";
+          const finishedAt = new Date().toISOString();
+          // Persist the parsed response before reporting it saved; a
+          // database failure here keeps the in-memory result and flags it
+          // unsaved instead of spending a second model call.
+          let resultSaved = !persistence;
+          if (persistence) {
+            try {
+              await persistence.completeItem(key, runId, itemId, {
+                status,
+                objects,
+                model: response.model,
+                truncated: response.truncated,
+                invalidDiscarded,
+                error: null,
+                providerRequestId: item.requestId,
+                finishedAt,
+              });
+              resultSaved = true;
+            } catch {
+              if (queue.generation !== generation) return;
+              resultSaved = false;
+            }
+          }
           dispatchTo(key, {
             type: "RUN_ITEM",
             runId,
             itemId,
             patch: {
-              status: objects.length > 0 ? "succeeded" : "empty",
+              status,
               objects,
               model: response.model,
+              truncated: response.truncated,
+              invalidDiscarded,
               error: null,
-              finishedAt: new Date().toISOString(),
+              resultSaved,
+              finishedAt,
             },
           });
+          persistence?.notifySettled(key);
           if (run.kind === "batch") importItemObjects(key, runId, itemId, response.model, objects);
           else dispatchTo(key, { type: "TEST_STAGE", runId, itemId });
         } catch (error) {
           release();
           if (queue.generation !== generation) return;
           if (controller.signal.aborted) {
+            const finishedAt = new Date().toISOString();
             dispatchTo(key, {
               type: "RUN_ITEM",
               runId,
               itemId,
-              patch: { status: "cancelled", finishedAt: new Date().toISOString() },
+              patch: { status: "cancelled", resultSaved: !persistence, finishedAt },
             });
+            if (persistence && registered) {
+              void persistence
+                .completeItem(key, runId, itemId, {
+                  status: "cancelled",
+                  objects: [],
+                  model: null,
+                  truncated: false,
+                  invalidDiscarded: 0,
+                  error: "Cancelled.",
+                  providerRequestId: item.requestId,
+                  finishedAt,
+                })
+                .then(
+                  () =>
+                    dispatchTo(key, {
+                      type: "RUN_ITEM",
+                      runId,
+                      itemId,
+                      patch: { resultSaved: true },
+                    }),
+                  () => undefined,
+                );
+            }
+            persistence?.notifySettled(key);
             cancelled = true;
             break;
+          }
+          const finishedAt = new Date().toISOString();
+          const message = samFailureMessage(error);
+          let resultSaved = !persistence;
+          if (persistence && registered) {
+            try {
+              await persistence.completeItem(key, runId, itemId, {
+                status: "failed",
+                objects: [],
+                model: null,
+                truncated: false,
+                invalidDiscarded: 0,
+                error: message,
+                providerRequestId: item.requestId,
+                finishedAt,
+              });
+              resultSaved = true;
+            } catch {
+              if (queue.generation !== generation) return;
+              resultSaved = false;
+            }
           }
           dispatchTo(key, {
             type: "RUN_ITEM",
@@ -794,10 +1163,12 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
             itemId,
             patch: {
               status: "failed",
-              error: samFailureMessage(error),
-              finishedAt: new Date().toISOString(),
+              error: message,
+              resultSaved,
+              finishedAt,
             },
           });
+          persistence?.notifySettled(key);
         } finally {
           if (queue.abort === controller) queue.abort = null;
         }
@@ -826,6 +1197,8 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
       const queue = queueFor(key);
       if (queue.running) return "A detection run is already in progress.";
       if (!optionsRef.current.prepareRaster) return "Raster preparation is unavailable.";
+      const persistence = optionsRef.current.persistence;
+      if (persistence && !persistence.isAvailable()) return persistence.unavailableReason();
       queue.running = true;
       setBusyKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
       void pumpQueue(key, runId);
@@ -853,6 +1226,8 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
       if (!concept.enabled) return "Enable this concept first.";
       const textError = conceptTextError(concept.text);
       if (textError) return textError;
+      const persistence = optionsRef.current.persistence;
+      if (persistence && !persistence.isAvailable()) return persistence.unavailableReason();
       const runId = `run-${session.runCounter + 1}`;
       dispatchTo(key, {
         type: "RUN_START",
@@ -862,6 +1237,8 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
           createdAt: new Date().toISOString(),
           finishedAt: null,
           cancelled: false,
+          viewIds: [view.viewId],
+          conceptIds: [concept.id],
           items: [
             {
               itemId: `${runId}-item-1`,
@@ -875,13 +1252,20 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
               model: null,
               error: null,
               attempts: 0,
+              truncated: false,
+              invalidDiscarded: 0,
+              artifactId: null,
+              supersedes: null,
               imported: false,
+              resultSaved: !persistence,
+              registered: false,
               startedAt: null,
               finishedAt: null,
             },
           ],
         },
       });
+      persistence?.notifySettled(key);
       return startQueue(key, runId);
     },
     [activeKey, dispatchTo, startQueue],
@@ -947,6 +1331,8 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
         return "A previous run already produced observations — replace it explicitly.";
       }
       if (replace && hasSamText) dispatchTo(key, { type: "SAM_REPLACE", observations: [] });
+      const persistence = optionsRef.current.persistence;
+      if (persistence && !persistence.isAvailable()) return persistence.unavailableReason();
       const runId = `run-${session.runCounter + 1}`;
       dispatchTo(key, {
         type: "RUN_START",
@@ -956,6 +1342,8 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
           createdAt: new Date().toISOString(),
           finishedAt: null,
           cancelled: false,
+          viewIds: views.map((view) => view.viewId),
+          conceptIds: concepts.map((concept) => concept.id),
           items: views.flatMap((view, viewIndex) =>
             concepts.map((concept, conceptIndex) => ({
               itemId: `${runId}-item-${viewIndex * concepts.length + conceptIndex + 1}`,
@@ -969,13 +1357,20 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
               model: null,
               error: null,
               attempts: 0,
+              truncated: false,
+              invalidDiscarded: 0,
+              artifactId: null,
+              supersedes: null,
               imported: false,
+              resultSaved: !persistence,
+              registered: false,
               startedAt: null,
               finishedAt: null,
             })),
           ),
         },
       });
+      persistence?.notifySettled(key);
       return startQueue(key, runId);
     },
     [activeKey, dispatchTo, startQueue],
@@ -1004,7 +1399,11 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
     }
   }, [activeKey, cancelQueue, dispatchTo]);
 
-  /** Re-queue failed and cancelled items of one run with fresh request IDs. */
+  /**
+   * Retry failed, cancelled, and interrupted items as new explicit attempts.
+   * Each retry is a new item (new paid call) linked to the attempt it
+   * supersedes; history keeps every outcome.
+   */
   const retryFailed = useCallback(
     (runId: string): string | null => {
       if (!activeKey) return "No active session.";
@@ -1014,27 +1413,114 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
       if (isStaleSession(session, optionsRef.current.liveContext)) {
         return "The session context changed — restart the preview.";
       }
+      const persistence = optionsRef.current.persistence;
+      if (persistence && !persistence.isAvailable()) return persistence.unavailableReason();
       const run = session.runs.find((entry) => entry.runId === runId);
       if (!run) return "Run not found.";
       const resumable = run.items.filter(
-        (item) => item.status === "failed" || item.status === "cancelled",
+        (item) =>
+          item.status === "failed" || item.status === "cancelled" || item.status === "interrupted",
       );
       if (resumable.length === 0) return "Nothing to retry.";
-      for (const item of resumable) {
-        dispatchTo(key, {
-          type: "RUN_ITEM",
-          runId,
-          itemId: item.itemId,
-          patch: {
-            status: "queued",
-            error: null,
+      // Skip items a newer attempt already supersedes (latest attempt only).
+      const superseded = new Set(
+        run.items.map((item) => item.supersedes).filter((id): id is string => id !== null),
+      );
+      const latestOnly = resumable.filter((item) => !superseded.has(item.itemId));
+      if (latestOnly.length === 0) return "Nothing to retry.";
+      const base = run.items.length;
+      dispatchTo(key, {
+        type: "RUN_ADD_ITEMS",
+        runId,
+        items: latestOnly.map((item, index) => ({
+          itemId: `${runId}-item-${base + index + 1}`,
+          requestId: newRequestId(),
+          viewId: item.viewId,
+          conceptId: item.conceptId,
+          conceptText: item.conceptText,
+          categoryIntent: item.categoryIntent,
+          status: "queued" as const,
+          objects: [],
+          model: null,
+          error: null,
+          attempts: item.attempts,
+          truncated: false,
+          invalidDiscarded: 0,
+          artifactId: null,
+          supersedes: item.itemId,
+          imported: false,
+          resultSaved: !persistence,
+          registered: false,
+          startedAt: null,
+          finishedAt: null,
+        })),
+      });
+      dispatchTo(key, { type: "RUN_REOPEN", runId });
+      persistence?.notifySettled(key);
+      return startQueue(key, runId);
+    },
+    [activeKey, dispatchTo, startQueue],
+  );
+
+  /**
+   * Retry one failed, cancelled, or interrupted item as a new attempt linked
+   * via supersedes. Never auto-runs; the completion section offers it per row.
+   */
+  const retryItem = useCallback(
+    (runId: string, itemId: string): string | null => {
+      if (!activeKey) return "No active session.";
+      const key = activeKey;
+      const session = sessionsRef.current[key];
+      if (!session || session.mode !== "manual") return "Nothing to retry.";
+      if (isStaleSession(session, optionsRef.current.liveContext)) {
+        return "The session context changed — restart the preview.";
+      }
+      const persistence = optionsRef.current.persistence;
+      if (persistence && !persistence.isAvailable()) return persistence.unavailableReason();
+      const run = session.runs.find((entry) => entry.runId === runId);
+      if (!run) return "Run not found.";
+      const item = run.items.find((entry) => entry.itemId === itemId);
+      if (
+        !item ||
+        (item.status !== "failed" && item.status !== "cancelled" && item.status !== "interrupted")
+      ) {
+        return "Nothing to retry.";
+      }
+      const superseded = new Set(
+        run.items.map((entry) => entry.supersedes).filter((id): id is string => id !== null),
+      );
+      if (superseded.has(item.itemId)) return "A newer attempt already supersedes this item.";
+      const base = run.items.length;
+      dispatchTo(key, {
+        type: "RUN_ADD_ITEMS",
+        runId,
+        items: [
+          {
+            itemId: `${runId}-item-${base + 1}`,
             requestId: newRequestId(),
+            viewId: item.viewId,
+            conceptId: item.conceptId,
+            conceptText: item.conceptText,
+            categoryIntent: item.categoryIntent,
+            status: "queued" as const,
+            objects: [],
+            model: null,
+            error: null,
+            attempts: item.attempts,
+            truncated: false,
+            invalidDiscarded: 0,
+            artifactId: null,
+            supersedes: item.itemId,
+            imported: false,
+            resultSaved: !persistence,
+            registered: false,
             startedAt: null,
             finishedAt: null,
           },
-        });
-      }
+        ],
+      });
       dispatchTo(key, { type: "RUN_REOPEN", runId });
+      persistence?.notifySettled(key);
       return startQueue(key, runId);
     },
     [activeKey, dispatchTo, startQueue],
@@ -1154,6 +1640,189 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
   const undoBlockedStale =
     activeSession !== null && isStaleSession(activeSession, options.liveContext);
 
+  /**
+   * Retry durable persistence of one completed in-memory result. Never a
+   * model call: re-sends the retained outcome to the idempotent endpoint.
+   */
+  const retryItemSave = useCallback(
+    async (runId: string, itemId: string): Promise<string | null> => {
+      if (!activeKey) return "No active session.";
+      const key = activeKey;
+      const persistence = optionsRef.current.persistence;
+      if (!persistence) return null;
+      if (!persistence.isAvailable()) return persistence.unavailableReason();
+      const session = sessionsRef.current[key];
+      const run = session?.runs.find((entry) => entry.runId === runId);
+      const item = run?.items.find((entry) => entry.itemId === itemId);
+      if (!session || !run || !item) return "Item not found.";
+      if (item.resultSaved) return null;
+      if (!item.registered) return "This item never reached the server — retry the detection instead.";
+      if (
+        item.status !== "succeeded" &&
+        item.status !== "empty" &&
+        item.status !== "failed" &&
+        item.status !== "cancelled"
+      ) {
+        return "Only completed results can be saved.";
+      }
+      try {
+        await persistence.completeItem(key, runId, itemId, {
+          status: item.status,
+          objects: item.objects,
+          model: item.model,
+          truncated: item.truncated,
+          invalidDiscarded: item.invalidDiscarded,
+          error: item.error,
+          providerRequestId: item.requestId,
+          finishedAt: item.finishedAt ?? new Date().toISOString(),
+        });
+      } catch (error) {
+        return persistenceFailureMessage("Save failed", error);
+      }
+      dispatchTo(key, { type: "RUN_ITEM", runId, itemId, patch: { resultSaved: true } });
+      persistence.notifySettled(key);
+      return null;
+    },
+    [activeKey, dispatchTo],
+  );
+
+  /**
+   * Restore-time recovery for one session: adopt completed server results
+   * without new model calls, then mark stranded items interrupted (never
+   * auto-retried). Reports what it did for an honest UI notice.
+   */
+  const recoverSession = useCallback(
+    async (key: string): Promise<RecoveryReport> => {
+      const report: RecoveryReport = { recovered: 0, interrupted: 0, clearedStaged: false };
+      const persistence = optionsRef.current.persistence;
+      const session = sessionsRef.current[key];
+      if (!session || session.mode !== "manual") return report;
+      const finishedAt = new Date().toISOString();
+      if (!persistence || !persistence.isAvailable()) {
+        dispatchTo(key, { type: "INTERRUPT_ITEMS", runId: null, finishedAt });
+        return report;
+      }
+      const slim = await persistence.listSlimItems(key).catch((): {
+        runId: string;
+        itemId: string;
+        status: string;
+      }[] => []);
+      const serverStatus = new Map(slim.map((entry) => [`${entry.runId} ${entry.itemId}`, entry.status]));
+      const adopt = async (
+        runId: string,
+        itemId: string,
+        kind: "test" | "batch",
+      ): Promise<boolean> => {
+        const full = await persistence.fetchFullItem(key, runId, itemId).catch(() => null);
+        if (!full || (full.status !== "succeeded" && full.status !== "empty")) return false;
+        dispatchTo(key, {
+          type: "RUN_ITEM",
+          runId,
+          itemId,
+          patch: {
+            status: full.status,
+            objects: full.objects,
+            model: full.model,
+            truncated: full.truncated,
+            invalidDiscarded: full.invalidDiscarded,
+            error: null,
+            resultSaved: true,
+            finishedAt: new Date().toISOString(),
+          },
+        });
+        if (kind === "batch") {
+          importItemObjects(key, runId, itemId, full.model ?? "unknown model", full.objects);
+        } else {
+          dispatchTo(key, { type: "TEST_STAGE", runId, itemId });
+        }
+        report.recovered += 1;
+        return true;
+      };
+      // Stranded in-flight items: adopt usable saved results, else interrupt.
+      const interruptRefs: { runId: string; itemId: string }[] = [];
+      for (const run of session.runs) {
+        for (const item of run.items) {
+          const inFlight =
+            item.status === "queued" || item.status === "preparing" || item.status === "detecting";
+          if (!inFlight) continue;
+          const status = serverStatus.get(`${run.runId} ${item.itemId}`);
+          if ((status === "succeeded" || status === "empty") && (await adopt(run.runId, item.itemId, run.kind))) {
+            continue;
+          }
+          interruptRefs.push({ runId: run.runId, itemId: item.itemId });
+        }
+      }
+      if (interruptRefs.length > 0) {
+        dispatchTo(key, { type: "INTERRUPT_ITEMS", runId: null, finishedAt });
+        report.interrupted = interruptRefs.length;
+        await persistence.interruptServerItems(key, interruptRefs);
+      }
+      // Terminal-but-unimported items that lost their objects: adopt or retire.
+      const live = sessionsRef.current[key] ?? session;
+      for (const run of live.runs) {
+        for (const item of run.items) {
+          if (item.imported || item.objects.length > 0) continue;
+          if (item.status !== "succeeded" && item.status !== "empty") continue;
+          if (!item.registered || !item.resultSaved) {
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId: run.runId,
+              itemId: item.itemId,
+              patch: {
+                status: "interrupted",
+                error:
+                  "The result was never saved and cannot be recovered. Retry explicitly for a new attempt.",
+                finishedAt: new Date().toISOString(),
+              },
+            });
+            report.interrupted += 1;
+            continue;
+          }
+          const status = serverStatus.get(`${run.runId} ${item.itemId}`);
+          if (status === "succeeded" || status === "empty") {
+            await adopt(run.runId, item.itemId, run.kind);
+          }
+        }
+      }
+      // Staged test without objects: reattach, or clear when unrecoverable.
+      const staged = sessionsRef.current[key]?.stagedTest;
+      if (staged) {
+        const current = sessionsRef.current[key];
+        const stagedItem = current?.runs
+          .find((entry) => entry.runId === staged.runId)
+          ?.items.find((entry) => entry.itemId === staged.itemId);
+        if (
+          stagedItem &&
+          stagedItem.objects.length === 0 &&
+          (stagedItem.status === "succeeded" || stagedItem.status === "empty")
+        ) {
+          const full = await persistence.fetchFullItem(key, staged.runId, staged.itemId).catch(() => null);
+          if (full && full.status === stagedItem.status && full.objects.length > 0) {
+            dispatchTo(key, {
+              type: "RUN_ITEM",
+              runId: staged.runId,
+              itemId: staged.itemId,
+              patch: {
+                objects: full.objects,
+                model: full.model,
+                truncated: full.truncated,
+                invalidDiscarded: full.invalidDiscarded,
+                resultSaved: true,
+              },
+            });
+            report.recovered += 1;
+          } else if (!full || (full.objects.length === 0 && full.status !== "empty")) {
+            dispatchTo(key, { type: "TEST_CLEAR" });
+            report.clearedStaged = true;
+          }
+        }
+      }
+      persistence.notifySettled(key);
+      return report;
+    },
+    [dispatchTo, importItemObjects],
+  );
+
   return {
     sessions,
     activeKey,
@@ -1177,6 +1846,7 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
     dispatch: (action: InventoryAction) => {
       if (activeKey) dispatchTo(activeKey, action);
     },
+    dispatchTo,
     undo,
     resetSession,
     restartSession,
@@ -1190,6 +1860,9 @@ export function useInventorySessions(options: UseInventorySessionsOptions) {
     runBatch,
     cancelBatch,
     retryFailed,
+    retryItem,
+    retryItemSave,
+    recoverSession,
     finishPreview,
     armPlacement,
     setPlacementDraft,

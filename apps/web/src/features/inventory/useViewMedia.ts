@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { ApiError } from "../../lib/api";
 import {
   fetchImagery,
@@ -86,5 +86,10 @@ export function useViewMedia(): ViewMedia {
   const ensureImage = useCallback((imageId: string) => load(imageId, false), [load]);
   const refreshImage = useCallback((imageId: string) => load(imageId, true), [load]);
 
-  return { states, ensureImage, refreshImage, mediaUrl: mediaUrlFor };
+  // Stable identity: thumbnail effects depend on this object, so a fresh
+  // literal per render would refetch failed images in a loop.
+  return useMemo(
+    () => ({ states, ensureImage, refreshImage, mediaUrl: mediaUrlFor }),
+    [states, ensureImage, refreshImage],
+  );
 }

@@ -18,6 +18,21 @@ export const STREETS_CLIENT_TIMEOUT_MS = 35_000;
 export interface UseStreetsOptions {
   roi: CommittedRoi | null;
   backendConnected: boolean;
+  /**
+   * Restored street snapshot for a reopened workspace (remount per
+   * workspace). Seeds the list without re-querying Overpass.
+   */
+  initial?: {
+    status: StreetsStatus;
+    streets: StreetWorkItem[];
+    query: StreetSearchResponse["query"] | null;
+    warnings: string[];
+    error: SearchError | null;
+    checkedIds: string[];
+    focusedId: string | null;
+    seeded: boolean;
+    snapshotId: number;
+  } | null;
 }
 
 /**
@@ -29,20 +44,28 @@ export interface UseStreetsOptions {
  * bump the selection version.
  */
 export function useStreets(options: UseStreetsOptions) {
-  const [status, setStatus] = useState<StreetsStatus>("idle");
-  const [streets, setStreets] = useState<StreetWorkItem[]>([]);
-  const [query, setQuery] = useState<StreetSearchResponse["query"] | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [error, setError] = useState<SearchError | null>(null);
-  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const initial = options.initial ?? null;
+  const [status, setStatus] = useState<StreetsStatus>(initial?.status ?? "idle");
+  const [streets, setStreets] = useState<StreetWorkItem[]>(initial?.streets ?? []);
+  const [query, setQuery] = useState<StreetSearchResponse["query"] | null>(initial?.query ?? null);
+  const [warnings, setWarnings] = useState<string[]>(initial?.warnings ?? []);
+  const [error, setError] = useState<SearchError | null>(initial?.error ?? null);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(
+    () => new Set(initial?.checkedIds ?? []),
+  );
   const [selectionVersion, setSelectionVersion] = useState(0);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
-  const [snapshotId, setSnapshotId] = useState(0);
-  const [seeded, setSeeded] = useState(false);
+  const [focusedId, setFocusedId] = useState<string | null>(initial?.focusedId ?? null);
+  const [snapshotId, setSnapshotId] = useState(initial?.snapshotId ?? 0);
+  const [seeded, setSeeded] = useState(initial?.seeded ?? false);
 
   const guardRef = useRef(createSearchGuard());
   const abortRef = useRef<AbortController | null>(null);
-  const lastKeyRef = useRef<string | null>(null);
+  // Prime the change detector so opening a workspace never fetches on
+  // mount — not for its own snapshot, and not for a region whose streets
+  // were never loaded (explicit Retry covers that).
+  const lastKeyRef = useRef<string | null>(
+    initial ? (options.roi && options.roi.valid ? `roi-${options.roi.id}` : null) : null,
+  );
 
   const roiRef = useRef(options.roi);
   roiRef.current = options.roi;

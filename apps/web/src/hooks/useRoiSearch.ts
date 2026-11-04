@@ -28,6 +28,22 @@ export interface UseRoiSearchOptions {
   backendConnected: boolean;
   /** Null while unknown (backend unreachable). */
   searchConfigured: boolean | null;
+  /**
+   * Restored discovery state for a reopened workspace (remount per
+   * workspace). Seeds pools/lists without running a new search.
+   */
+  initial?: {
+    roi: CommittedRoi;
+    images: ImageResult[];
+    seeds: ImageResult[];
+    query: SearchQueryMeta | null;
+    warnings: string[];
+    searchError: SearchError | null;
+    status: SearchStatus;
+    everSearched: boolean;
+    imagerySnapshotId: number;
+    requestedImageId: string | null;
+  } | null;
 }
 
 const EMPTY_SEARCH = {
@@ -51,32 +67,37 @@ const MAX_HYDRATED_POOL = 20_000;
  */
 export function useRoiSearch(options: UseRoiSearchOptions) {
   const mapRef = useRef<LeafletMap | null>(null);
-  const [roi, setRoi] = useState<CommittedRoi | null>(null);
+  const initial = options.initial ?? null;
+  const [roi, setRoi] = useState<CommittedRoi | null>(initial?.roi ?? null);
   const [drawing, setDrawing] = useState<DrawingTool>(null);
   const [draft, setDraft] = useState<DraftShape | null>(null);
-  const [status, setStatus] = useState<SearchStatus>("idle");
-  const [images, setImages] = useState<ImageResult[]>(EMPTY_SEARCH.images);
+  const [status, setStatus] = useState<SearchStatus>(initial?.status ?? "idle");
+  const [images, setImages] = useState<ImageResult[]>(initial?.images ?? EMPTY_SEARCH.images);
   /** Discovery seeds (in-RoI by construction); grouping input, never hydrated. */
-  const [seeds, setSeeds] = useState<ImageResult[]>([]);
-  const [query, setQuery] = useState<SearchQueryMeta | null>(EMPTY_SEARCH.query);
-  const [warnings, setWarnings] = useState<string[]>(EMPTY_SEARCH.warnings);
-  const [searchError, setSearchError] = useState<SearchError | null>(EMPTY_SEARCH.searchError);
-  const [requestedImage, setRequestedImage] = useState<RequestedImage | null>(null);
+  const [seeds, setSeeds] = useState<ImageResult[]>(initial?.seeds ?? []);
+  const [query, setQuery] = useState<SearchQueryMeta | null>(initial?.query ?? EMPTY_SEARCH.query);
+  const [warnings, setWarnings] = useState<string[]>(initial?.warnings ?? EMPTY_SEARCH.warnings);
+  const [searchError, setSearchError] = useState<SearchError | null>(
+    initial?.searchError ?? EMPTY_SEARCH.searchError,
+  );
+  const [requestedImage, setRequestedImage] = useState<RequestedImage | null>(
+    initial?.requestedImageId ? { id: initial.requestedImageId, token: 1 } : null,
+  );
   const [viewerActual, setViewerActual] = useState<ViewerActual>({
     imageId: null,
     sequenceId: null,
     position: null,
   });
-  const [everSearched, setEverSearched] = useState(false);
+  const [everSearched, setEverSearched] = useState(initial?.everSearched ?? false);
   /** Bumps on every discovery completion and pool-expanding hydration. */
-  const [imagerySnapshotId, setImagerySnapshotId] = useState(0);
+  const [imagerySnapshotId, setImagerySnapshotId] = useState(initial?.imagerySnapshotId ?? 0);
 
-  const roiIdRef = useRef(0);
-  const requestTokenRef = useRef(0);
+  const roiIdRef = useRef(initial?.roi.id ?? 0);
+  const requestTokenRef = useRef(initial?.requestedImageId ? 1 : 0);
   const guardRef = useRef(createSearchGuard());
   const searchAbortRef = useRef<AbortController | null>(null);
   /** Seed IDs of the current discovery; hydrated records evict around them. */
-  const seedIdsRef = useRef<Set<string>>(new Set());
+  const seedIdsRef = useRef<Set<string>>(new Set((initial?.seeds ?? []).map((seed) => seed.id)));
 
   // Mirrors for stable async callbacks.
   const roiRef = useRef<CommittedRoi | null>(null);

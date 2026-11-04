@@ -1,11 +1,16 @@
 import express from "express";
 import cors from "cors";
+import { getDbState } from "./db/connection.js";
 import { createSearchRouter, isMapillarySearchConfigured } from "./routes/mapillarySearch.js";
 import { createDetectionRouter, isSamDetectionConfigured } from "./routes/detection.js";
 import { createImageryRouter } from "./routes/imagery.js";
 import { createSequenceRouter } from "./routes/sequenceDetail.js";
 import { samModelName } from "./sam.js";
 import { createStreetsRouter } from "./routes/streetsSearch.js";
+import { createArtifactsRouter } from "./routes/artifacts.js";
+import { createItemsRouter } from "./routes/items.js";
+import { createSessionsRouter } from "./routes/sessions.js";
+import { createWorkspacesRouter } from "./routes/workspaces.js";
 
 export const SERVICE_NAME = "openstreetlightmapper-server";
 
@@ -31,11 +36,9 @@ export interface AppOptions {
 /**
  * Express application.
  *
- * MongoDB integration boundary (pending): persistence is deferred to a later
- * milestone. `MONGODB_URI` is reserved in `.env.example` but no connection is
- * established here and no schemas/collections are created. Future Meta model
- * calls and private credentials must live on this server, never in the
- * browser bundle.
+ * Workspace persistence lives in MongoDB (see db/ and the storage routes);
+ * the process connects in index.ts. Meta model calls and private credentials
+ * stay on this server, never in the browser bundle.
  */
 export function createApp(options?: AppOptions): express.Express {
   const app = express();
@@ -47,12 +50,14 @@ export function createApp(options?: AppOptions): express.Express {
   app.use(express.json({ limit: "12mb" }));
 
   app.get("/api/health", (_req, res) => {
-    // Intentionally no database field: no connection has been established.
     // `configured` means a key is present, not verified/authenticated; the
-    // health check never makes chargeable model calls.
+    // health check never makes chargeable model calls. `database.state`
+    // reports the live connection (connected/connecting/unavailable): a
+    // present MONGODB_URI alone is not a successful connection.
     res.json({
       service: SERVICE_NAME,
       status: "ok",
+      database: { state: getDbState() },
       providers: {
         mapillarySearch: { configured: isMapillarySearchConfigured() },
         samDetection: { configured: isSamDetectionConfigured(), model: samModelName() },
@@ -96,6 +101,11 @@ export function createApp(options?: AppOptions): express.Express {
       overpassUrl: options?.overpassUrl,
     }),
   );
+
+  app.use(createWorkspacesRouter());
+  app.use(createSessionsRouter());
+  app.use(createItemsRouter());
+  app.use(createArtifactsRouter());
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });

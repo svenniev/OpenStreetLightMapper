@@ -166,7 +166,7 @@ describe("StreetPanel", () => {
     for (const button of buttons) {
       expect((button as HTMLButtonElement).disabled).toBe(true);
       expect(button.getAttribute("title")).toBe(
-        "Available after inventory mapping is complete.",
+        "Available after a reviewed result is saved.",
       );
     }
     // Preparation alone must not enable Results.
@@ -197,20 +197,19 @@ describe("StreetPanel", () => {
     expect(onOpenResults).toHaveBeenCalledWith("m");
   });
 
-  it("labels preview-backed Results buttons as session previews", () => {
+  it("labels saved-results buttons as saved inventory results", () => {
     render(
       <StreetPanel
         {...props({
           resultsAvailable: new Set(["a"]),
-          previewResults: new Set(["a"]),
         })}
       />,
     );
-    const preview = screen.getByRole("button", {
-      name: /open session preview results for apple way/i,
+    const saved = screen.getByRole("button", {
+      name: /open saved inventory results for apple way/i,
     }) as HTMLButtonElement;
-    expect(preview.disabled).toBe(false);
-    expect(preview.title).toBe("Open session preview results (temporary, not saved).");
+    expect(saved.disabled).toBe(false);
+    expect(saved.title).toBe("Open saved inventory results.");
   });
 
   it("offers Seed data next to Retry on failure, gated on sequences", () => {

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SourceView } from "./inventoryTypes";
 import { PhotoCanvas } from "./PhotoCanvas";
 
@@ -15,12 +15,17 @@ function view(overrides: Partial<SourceView> = {}): SourceView {
     width: 2000,
     height: 1000,
     mediaHandle: "h-1",
+    artifactId: null,
     fullyReviewed: false,
     ...overrides,
   };
 }
 
 describe("PhotoCanvas", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("places overlay rects from view dimensions", () => {
     const { container } = render(
       <PhotoCanvas
@@ -155,6 +160,9 @@ describe("PhotoCanvas", () => {
   });
 
   it("renders crop views on a canvas, not the full photo", () => {
+    // Crop decoding fetches pixels; this test covers DOM structure only, so
+    // the fetch stays pending deterministically instead of hitting network.
+    vi.stubGlobal("fetch", () => new Promise<Response>(() => {}));
     const { container } = render(
       <PhotoCanvas
         mediaUrl="/media"

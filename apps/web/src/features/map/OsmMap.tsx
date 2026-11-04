@@ -129,6 +129,25 @@ function AssetMarker(props: {
   );
 }
 
+/** Reports settled map views (pan/zoom) for workspace persistence. */
+function ViewReporter(props: { onViewChange: ((center: LatLngPair, zoom: number) => void) | undefined }) {
+  const map = useMap();
+  const callbackRef = useRef(props.onViewChange);
+  callbackRef.current = props.onViewChange;
+  useEffect(() => {
+    if (!callbackRef.current) return;
+    const report = () => {
+      const center = map.getCenter();
+      callbackRef.current?.([center.lat, center.lng], map.getZoom());
+    };
+    map.on("moveend", report);
+    return () => {
+      map.off("moveend", report);
+    };
+  }, [map]);
+  return null;
+}
+
 /** Temporary drawing listeners: attached only in drawing mode, removed after. */
 function DrawingHandler(props: DrawingHandlerProps) {
   const map = useMap();
@@ -318,6 +337,10 @@ export interface OsmMapProps {
   selectedAssetId: string | null;
   onPlacementClick: (pair: LatLngPair) => void;
   onAssetMarkerClick: (id: string) => void;
+  /** Restored map view for a reopened workspace (mount-time only). */
+  initialView?: { center: LatLngPair; zoom: number } | null;
+  /** Settled map view after pan/zoom (for workspace persistence). */
+  onViewChange?: (center: LatLngPair, zoom: number) => void;
 }
 
 export function OsmMap(props: OsmMapProps) {
@@ -327,8 +350,8 @@ export function OsmMap(props: OsmMapProps) {
     <>
       <MapContainer
         ref={props.mapRef}
-        center={INITIAL_CENTER}
-        zoom={INITIAL_ZOOM}
+        center={props.initialView?.center ?? INITIAL_CENTER}
+        zoom={props.initialView?.zoom ?? INITIAL_ZOOM}
         scrollWheelZoom
         preferCanvas
         className={`map-container${props.placementArmed ? " map-container--placing" : ""}`}
@@ -407,6 +430,7 @@ export function OsmMap(props: OsmMapProps) {
         />
         <ScrollOnArmed armed={props.placementArmed} />
         <ResizeHandler />
+        <ViewReporter onViewChange={props.onViewChange} />
       </MapContainer>
       <ul className="map-legend" aria-label="Map marker legend">
         <li>

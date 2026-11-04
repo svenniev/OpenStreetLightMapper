@@ -14,6 +14,7 @@ import {
 import { PlaceStep } from "./PlaceStep";
 import { ReviewStep } from "./ReviewStep";
 import type { InventorySessions } from "./useInventorySessions";
+import type { MaskFetcher } from "./useEvidence";
 import type { SamStatus } from "./useSamStatus";
 import type { ViewMedia } from "./useViewMedia";
 
@@ -35,6 +36,14 @@ export interface InventoryWorkspaceProps {
   viewMedia: ViewMedia;
   /** SAM readiness + explicit test state. */
   sam: SamStatus;
+  /** Mask recovery for restored observations (null without a workspace). */
+  maskFetcher: MaskFetcher | null;
+  /** Reviewed-result saving (null without a workspace). */
+  resultSave: { onSave: () => void; saving: boolean; error: string | null } | null;
+  /** Scroll back to the inventory workflow from map placement. */
+  onReturnToInventory: () => void;
+  /** Scroll to the main map when a real placement is armed. */
+  onGoToMap: () => void;
 }
 
 function stepIndex(step: WorkflowStep): number {
@@ -224,20 +233,34 @@ export function InventoryWorkspace(props: InventoryWorkspaceProps) {
           <ReviewStep
             sessions={sessions}
             session={session}
+            sessionKey={session.key}
             stale={stale}
             poolImages={props.poolImages}
             onSelectImage={props.onSelectImage}
             viewMedia={props.viewMedia}
+            maskFetcher={props.maskFetcher}
           />
         )}
         {session.activeStep === "group" && (
           <GroupStep sessions={sessions} session={session} stale={stale} viewMedia={props.viewMedia} />
         )}
         {session.activeStep === "place" && (
-          <PlaceStep sessions={sessions} session={session} stale={stale} />
+          <PlaceStep
+            sessions={sessions}
+            session={session}
+            stale={stale}
+            onReturnToInventory={props.onReturnToInventory}
+            onGoToMap={props.onGoToMap}
+          />
         )}
         {session.activeStep === "inventory" && (
-          <InventoryStep sessions={sessions} session={session} stale={stale} onOpenResults={props.onOpenResults} />
+          <InventoryStep
+            sessions={sessions}
+            session={session}
+            stale={stale}
+            onOpenResults={props.onOpenResults}
+            resultSave={props.resultSave}
+          />
         )}
       </div>
     </div>

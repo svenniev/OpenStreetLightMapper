@@ -60,6 +60,7 @@ function view(crop: SourceView["crop"]): SourceView {
     width: 2000,
     height: 1000,
     mediaHandle: "h",
+    artifactId: null,
     fullyReviewed: false,
   };
 }

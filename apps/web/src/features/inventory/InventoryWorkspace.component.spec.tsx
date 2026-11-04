@@ -68,6 +68,10 @@ function Harness(props: HarnessProps) {
       currentImageId={null}
       viewMedia={viewMedia}
       sam={OFFLINE_SAM}
+      maskFetcher={null}
+      resultSave={null}
+      onReturnToInventory={() => {}}
+      onGoToMap={() => {}}
     />
   );
 }
@@ -188,6 +192,9 @@ describe("InventoryWorkspace demo walkthrough", () => {
   }, 30000);
 
   it("syncs inventory rows with diagram pins in both directions", async () => {
+    vi.stubGlobal("fetch", () => {
+      throw new Error("demo must not fetch");
+    });
     const { api } = setup();
     act(() => {
       api.current!.openDemo();
@@ -235,6 +242,9 @@ describe("InventoryWorkspace demo walkthrough", () => {
   });
 
   it("explains mixed selections, previews merges, and undoes grouping", async () => {
+    vi.stubGlobal("fetch", () => {
+      throw new Error("demo must not fetch");
+    });
     const { container, api } = setup();
     act(() => {
       api.current!.openDemo();
@@ -294,6 +304,32 @@ describe("InventoryWorkspace demo walkthrough", () => {
   }, 30000);
 
   it("walks a manual street from empty detection to keyboard-placed finish", () => {
+    // Deterministic photograph metadata: review thumbnails fetch on demand.
+    vi.stubGlobal(
+      "fetch",
+      (async (url: string) => {
+        const imageId = String(url).split("/").pop() ?? "img-1";
+        return new Response(
+          JSON.stringify({
+            image: {
+              imageId,
+              sequenceId: "seq-1",
+              capturedAt: 1700000000000,
+              isPano: false,
+              attribution: "© Mapillary contributors — tester",
+              sourceUrl: `https://www.mapillary.com/map/im/${imageId}`,
+              resolution: "2048px thumbnail",
+            },
+            media: {
+              handle: `handle-${imageId}`,
+              url: `/api/imagery/media/handle-${imageId}`,
+              expiresAt: "2026-11-03T13:00:00.000Z",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as unknown as typeof fetch,
+    );
     const { container, api, onSelectImage, onOpenResults } = setup([poolImage("img-1"), poolImage("img-2")]);
     act(() => {
       api.current!.openStreet("street-1", "Main Street");
@@ -337,6 +373,9 @@ describe("InventoryWorkspace demo walkthrough", () => {
   });
 
   it("requires rectangles for demo accepts, confirms resets, and freezes stale work", async () => {
+    vi.stubGlobal("fetch", () => {
+      throw new Error("demo must not fetch");
+    });
     const { container, api } = setup();
     act(() => {
       api.current!.openDemo();

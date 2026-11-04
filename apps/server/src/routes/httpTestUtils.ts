@@ -87,6 +87,39 @@ export async function postJson(
   });
 }
 
+export async function putJson(
+  app: express.Express,
+  routePath: string,
+  payload: unknown,
+  suffix: string,
+): Promise<RouteResponse> {
+  return withServer(app, suffix, async (socketPath) => {
+    const data = JSON.stringify(payload);
+    return new Promise<RouteResponse>((resolve, reject) => {
+      const request = http.request(
+        {
+          socketPath,
+          path: routePath,
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(data),
+          },
+        },
+        (response) => {
+          readJson(response).then(
+            (body) =>
+              resolve({ status: response.statusCode ?? 0, headers: response.headers, body }),
+            reject,
+          );
+        },
+      );
+      request.on("error", reject);
+      request.end(data);
+    });
+  });
+}
+
 export async function getJson(
   app: express.Express,
   routePath: string,

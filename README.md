@@ -1,30 +1,34 @@
 # OpenStreetLightMapper
 
-**AI-assisted public-lighting inventory** — Milestone 5: real-photo detection with SAM.
+**AI-assisted public-lighting inventory** — Milestone 6: local database persistence
+and UI cleanup.
 
 OpenStreetLightMapper is an open-source system intended to convert street-level imagery
 and map geometry into an auditable public-lighting asset inventory and a
 roadway-lighting dataset suitable for subsequent EN 13201 workflows.
 
-> This milestone runs real detection on Mapillary photographs: choose in-region
-> sources, test and batch text-prompt segmentation through hosted SAM 3.1, review
-> every sighting on the analyzed photos, group them into pole/luminaire assets,
-> place assets manually, and finish a temporary session preview per street. Without
-> a model key the same workflow runs manual-only. Nothing is saved, and nothing
-> here is EN 13201 compliant or standards-certified. See
-> [What is deferred](#what-is-deferred).
+> This milestone persists work in named local workspaces: regions, streets,
+> imagery selections, inventory sessions, detection evidence, and immutable
+> reviewed results all survive refresh and restart via a loopback-only MongoDB.
+> Detection still runs on Mapillary photographs (SAM 3.1 text prompts, or
+> manual-only without a model key), and nothing here is EN 13201 compliant or
+> standards-certified. See [What is deferred](#what-is-deferred).
 
 Specifications: [docs/specs/01_OpenStreetLightMapper-Kickoff.md](docs/specs/01_OpenStreetLightMapper-Kickoff.md),
 [docs/specs/02_initial_tailoring.md](docs/specs/02_initial_tailoring.md),
 [docs/specs/03_workflow.md](docs/specs/03_workflow.md),
 [docs/specs/04_detect_to_display_inventory.md](docs/specs/04_detect_to_display_inventory.md),
-[docs/specs/05_detect_to_display_inventory_2.md](docs/specs/05_detect_to_display_inventory_2.md)
+[docs/specs/05_detect_to_display_inventory_2.md](docs/specs/05_detect_to_display_inventory_2.md),
+[docs/specs/06_init_database_UI_clean.md](docs/specs/06_init_database_UI_clean.md)
 
 ## Requirements
 
 - **Node.js** `>= 20.19.0` (developed and verified with `v22.19.0`; Node 22 LTS recommended)
 - **npm** 10+ (lockfile is committed; install with `npm install`)
-- No MongoDB instance required for this milestone.
+- **Docker Desktop** with Compose, for the local MongoDB container that stores
+  workspaces (loopback-only, no authentication — see
+  [infra/database/README.md](infra/database/README.md)). Without it the app opens
+  but reports **Not saved — local database unavailable**.
 - No Mapillary token required to open the app, draw regions, or use the map. A
   browser viewer token enables imagery; a server search token enables region search
   (see [Configuration](#configuration)).
@@ -36,10 +40,13 @@ Specifications: [docs/specs/01_OpenStreetLightMapper-Kickoff.md](docs/specs/01_O
 
 ```powershell
 npm install
+powershell -ExecutionPolicy Bypass -File infra\database\start.ps1
 npm run dev
 ```
 
-Then open [http://localhost:5173](http://localhost:5173) in a browser.
+Then open [http://localhost:5173](http://localhost:5173) in a browser. Create a
+workspace from the header menu — the URL carries its ID, so refresh and restart
+reopen the same workspace from the server.
 
 - Frontend (Vite): `http://localhost:5173`
 - Backend health (via Vite proxy): `http://localhost:5173/api/health`
@@ -79,7 +86,7 @@ Copy-Item apps\server\.env.example apps\server\.env
 | `MODEL_API_KEY`                 | `apps/server/.env` | Meta Model API key for server-side SAM detection (test + batch) |
 | `SAM_MODEL` (optional)          | `apps/server/.env` | SAM model name (default `sam-3.1`)                          |
 | `SAM_TIMEOUT_MS` (optional)     | `apps/server/.env` | Per-inference deadline in ms, 10 s–300 s (default `120000`) |
-| `MONGODB_URI`                   | `apps/server/.env` | **Reserved, unused.** No connection is made.                |
+| `MONGODB_URI`                   | `apps/server/.env` | Local MongoDB connection (`mongodb://127.0.0.1:27018/openstreetlightmapper`) |
 
 Get a Mapillary client token from the
 [Mapillary developer dashboard](https://www.mapillary.com/dashboard/developers)
@@ -102,7 +109,7 @@ does not prove server search is configured.
    view (`Use current map view` — keyboard-accessible via Leaflet's map keyboard
    navigation). `Escape` cancels a draft. Every committed region has a revision
    identity; replacing or clearing it discards dependent lists and plans.
-3. Check the sidebar for shape type, approximate geodesic area, and readiness.
+3. Check the map panel for shape type, approximate geodesic area, and readiness.
    Regions are limited to **25 km²** and a provider bounding box strictly below
    **0.01 square degrees**; oversized selections stay visible with an error so you
    can redraw them.
@@ -117,26 +124,29 @@ does not prove server search is configured.
    dates), select one to plot its camera positions, and page its image list. The
    **Inside RoI / Whole sequence** scope toggles outside-region context points.
 6. Select a map marker or list row to load that image in the MapillaryJS viewer.
-   Manual image-ID entry remains available as a testing option.
-7. Click `Start Processing` in Settings when enabled. It validates the current
-   inputs and builds an immutable in-memory work plan (one work item per checked
-   street, shared in-RoI image pool by reference, preserved warnings) — real
-   preparation, not a simulation. Changing streets, selections, or imagery marks
-   the plan stale until prepared again.
-8. Optionally verify **SAM detection** in Settings: with `MODEL_API_KEY`
+   Manual image-ID entry lives under Settings → Developer tools.
+7. Click `Prepare selected streets` (beside the street list) when enabled. It
+   validates the current inputs and builds an immutable work plan (one work item
+   per checked street, shared in-RoI image pool by reference, preserved warnings)
+   — real preparation, not a simulation. Changing streets, selections, or imagery
+   marks the plan stale until prepared again.
+8. Optionally verify **SAM detection** in the Settings drawer: with `MODEL_API_KEY`
    configured, `Test on selected image` runs one concept on the viewer image and
    reports success (even with zero matches) or an actionable error. Only a
    successful inference proves access.
-9. Open the **Inventory workflow** in Settings for an included street (`Use queried
-   images`; a seeded work area instead offers `Continue with selected imagery —
-   street unverified`). In Detect, choose up to ten in-region source images (spread
-   sampling available), freeze them, edit one-concept-per-request prompts, test one
-   view, then batch across views × concepts. Without a model key, continue manual-only.
-   Walk the five steps — Detect, Review, Group assets, Place assets, Inventory — to
-   review every sighting on the analyzed photographs, group them into pole/luminaire
-   assets, place them manually, and finish a temporary session preview. Finished
-   previews enable that street's `Results` button with a `Session preview` label.
-   The schematic demo still exists under `Developer examples — illustrations`.
+9. Open the **Inventory workflow** beside the street list for an included street
+   (`Use queried images`; a seeded work area instead offers `Continue with selected
+   imagery — street unverified`). In Detect, choose up to ten in-region source images
+   (spread sampling available), freeze them, edit one-concept-per-request prompts,
+   test one view, then batch across views × concepts. Without a model key, continue
+   manual-only. Walk the five steps — Detect, Review, Group assets, Place assets,
+   Inventory — to review every sighting on the analyzed photographs, group them into
+   pole/luminaire assets, place them manually, finish a preview, and **Save reviewed
+   result**. Saved results (server-acknowledged, immutable versions) enable that
+   street's `Results` button. The schematic demo still exists under `Developer
+   examples — illustrations`. Edits autosave to the open workspace (see the header
+   save state); later edits open a draft while prior saved versions stay
+   reproducible.
 
 Search results are the images returned for that query only — never complete
 coverage, never proof about streetlights. Camera positions are not lamp positions.
@@ -145,10 +155,12 @@ A street with no available imagery is not a street without lights.
 **Previews are not inventory completion.** SAM sightings are candidates until a
 human accepts, corrects (corrected output reads as SAM assisted), and groups them;
 failed or cancelled calls are never zero matches, and finishing acknowledges any
-incomplete processing. Session previews are temporary, unsaved, and clearly
-labeled with street provenance, model, and processing counts; completed inventory
-records (measurement) remain a future stage. Preparation never downloads full
-images, runs segmentation, or detects lights.
+incomplete processing. Unfinished session previews are clearly labeled with street
+provenance, model, and processing counts; only server-acknowledged **Saved
+results** count as durable reviewed inventory — and even those are not measured
+asset positions, complete street coverage, or EN 13201 compliance. Completed
+inventory records (measurement) remain a future stage. Preparation never downloads
+full images, runs segmentation, or detects lights.
 
 ## Architecture
 
@@ -165,15 +177,21 @@ apps/
       features/inventory/   Source selection, SAM test/batch queue, photo review,
                             grouping, placement, inventory previews (demo + manual)
       features/results/     Result modal: completed contract + session-preview branch
-      features/settings/    Region/search sidebar + SAM detection section + Start Processing
+      features/settings/    Action sections (map/sequences/streets) + settings drawer
+                            (Providers, Local database, Developer tools)
+      features/workspaces/  Workspace store (autosave, revisions, conflicts),
+                            content shell, save banner, workspace menu
       hooks/                Backend health, region/search orchestration
       lib/                  Config, API + detection clients, shared types
     .env.example
   server/                   Node.js + Express + TypeScript
     src/
       app.ts                Express app (health, routes, 404 handler)
+      db/                   Mongoose connection, schemas, GridFS evidence, validation
       routes/               images/search, sequences/:id/images, streets/search,
-                            imagery/:id, imagery/media/:handle, detection/sam
+                            imagery/:id, imagery/media/:handle, detection/sam,
+                            workspaces, sessions, detection items, artifacts,
+                            reviewed results
       mapillary.ts          Bounded Mapillary client (shared provider transport)
       sequences.ts          Sequence membership + batched metadata hydration
       streets.ts            Overpass adapter: eligibility, clipping, grouping
@@ -211,15 +229,20 @@ packages/
 - **Shared geo** (`packages/geo`): single source of truth for region validation,
   geodesic area, point-in-polygon, and segment/polygon clipping with fragment
   measurement, used identically by client and server.
-- **Database boundary (pending):** MongoDB/Mongoose persistence is deferred. The
-  server establishes **no** database connection, creates no schemas or collections,
-  and the health response reports no database state. `MONGODB_URI` is reserved in
-  `apps/server/.env.example` for the future milestone.
+- **Database:** Mongoose-backed MongoDB persistence (loopback-only container, see
+  [infra/database/README.md](infra/database/README.md)). Named workspaces hold the
+  RoI, street/imagery selections, preparation, inventory sessions, immutable
+  detection items, GridFS evidence artifacts, and immutable reviewed-result
+  versions. Mutable records carry monotonic revisions; stale writes conflict
+  (reload newer or save as new workspace) instead of overwriting. Health reports
+  `database.state` (connected / connecting / unavailable) without credentials.
 
-The workspace layout is a large central area (Map ≈60% / street imagery ≈40%) with
-a sequences panel below the map, a full-width inventory workspace when open, a
-full-width streets panel, and an ~300 px settings sidebar; panels stack at narrow
-widths. The header's backend indicator is derived live from `/api/health`
+The header holds the app title, the workspace menu (New/Open/Rename), the save
+state with Save now, Settings, and the backend indicator. Below it run full-width
+panels in DOM order: Map + street imagery side by side, Mapillary sequences,
+Streets in region (with Prepare selected streets and the inventory entry beside
+the selection), then the inventory workspace. Panels stack at narrow widths.
+The header's backend indicator is derived live from `/api/health`
 (connected / checking / unavailable + retry) — a stopped backend produces a
 clear, recoverable state instead of a crash.
 
@@ -252,9 +275,13 @@ the map to fabricated coordinates.
   not configured" hint; without `MAPILLARY_ACCESS_TOKEN`, search reports its own
   configuration state. Street retrieval is independent of Mapillary configuration.
   Map, drawing, and settings keep working regardless.
-- No persistence: regions, results, selections, work plans, and inventory previews
-  are in-memory only; reloading clears them (a before-unload warning guards edited
-  previews).
+- Persistence is local-only: workspaces live in the loopback MongoDB container
+  (no authentication — a local-development configuration, not remotely
+  deployable). Unsaved edits stay in memory with a before-unload warning; a
+  second tab with an old revision gets a conflict dialog instead of a silent
+  merge. There is no workspace deletion, no cloud sync, and no
+  authentication. Previously lost memory-only sessions cannot be recovered
+  retroactively.
 - Preparation references the shared in-RoI image pool by ID with
   `imageAssociation: "pending"` — no image-to-street matching is performed, and no
   sequence is assumed to cover any street.
@@ -262,7 +289,7 @@ the map to fabricated coordinates.
   luminaires are counted separately (never summed as "streetlights"); placements are
   manual approximations or explicitly unknown; heights, mounting, power, spacing, and
   arrangement are not assessed. Demo positions live on a schematic diagram and are
-  never geographic. There is no Save, Publish, Export, or EN 13201 function.
+  never geographic. There is no Publish, Export, or EN 13201 function.
 - Detection is bounded: at most ten inference views per run (crops included), at most
   twenty model calls per batch, one call at a time, one concept per request. Masks
   are shown for inspection; only rectangles enter review geometry. Precision/recall
@@ -315,10 +342,11 @@ Recorded here as product direction for later milestones; none of this is built y
 Automated collection, satellite/aerial integration, district boundaries, geocoding
 search, bulk download, vector-tile ingestion, automatic subdivision, completed
 pole/luminaire records, height/spacing calculations, EN 13201 assessment, exports,
-persistence, authentication, payments, cloud deployment, and a general settings
-framework — all intentionally absent. Coverage overlays and exhaustive large-area
-retrieval need a separately specified strategy. Box/point-assisted prompting and
-prompt-comparison calibration beyond the prompt check are future work.
+authentication, payments, cloud deployment, workspace deletion, and a general
+settings framework — all intentionally absent. Coverage overlays and exhaustive
+large-area retrieval need a separately specified strategy. Box/point-assisted
+prompting and prompt-comparison calibration beyond the prompt check are future
+work.
 
 ## License
 
