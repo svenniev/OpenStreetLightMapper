@@ -10,6 +10,10 @@ around other professional commitments, using Meta Muse as the coding agent.
 [Source code](https://github.com/svenniev/OpenStreetLightMapper) ·
 [Local database setup](infra/database/README.md)
 
+[![OpenStreetLightMapper main interface with a Leaflet map, selected region, Mapillary street imagery, and image sequences](docs/img/Screenshot%20main%20screen.png)](docs/img/Screenshot%20main%20screen.png)
+
+*Explore a region with Leaflet and Mapillary street imagery side by side.*
+
 ## Why this project
 
 As a designer of LED roadway-lighting optics and lighting installations, I need
@@ -22,6 +26,14 @@ The working prototype lets users select an area, browse image sequences, detect
 poles and luminaires, review and merge observations, and save inventory
 workspaces. Automatic detection and mapping are an experimental extension;
 reliable dimensional measurements remain future work.
+
+## Segmentation examples
+
+Street-light poles highlighted in three street-level images. Click an image to view it at full size.
+
+| View 1 | View 2 | View 3 |
+| :---: | :---: | :---: |
+| [![Street-light pole highlighted by segmentation in view 1](docs/img/Screenshot%20segmentation%201.png)](docs/img/Screenshot%20segmentation%201.png) | [![Street-light pole highlighted by segmentation in view 2](docs/img/Screenshot%20segmentation%202.png)](docs/img/Screenshot%20segmentation%202.png) | [![Street-light pole highlighted by segmentation in view 3](docs/img/Screenshot%20segmentation%203.png)](docs/img/Screenshot%20segmentation%203.png) |
 
 ## Built with Meta
 
